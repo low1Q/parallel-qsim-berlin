@@ -33,7 +33,7 @@
         <protobuf.version>4.28.2</protobuf.version>
         <protobuf.plugin.version>0.6.1</protobuf.plugin.version>
         <java.version>21</java.version>
-        <rust.qsim.source>/Users/paulh/git/parallel_qsim_rust</rust.qsim.source>
+        <rust.qsim.source>/home/lowiq/MATSimBA/parallel_qsim_rust</rust.qsim.source>
     </properties>
 
     <dependencies>

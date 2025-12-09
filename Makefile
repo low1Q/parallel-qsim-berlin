@@ -1,7 +1,7 @@
 JAR := parallel-qsim-berlin-*.jar
 BV := v6.4
 
-RUST_BASE := ~/git/parallel_qsim_rust
+RUST_BASE := ~/MATSimBA/parallel_qsim_rust
 RUST_BIN := local_qsim
 
 MEMORY ?= 20G

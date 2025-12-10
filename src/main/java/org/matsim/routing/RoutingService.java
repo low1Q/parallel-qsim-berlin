@@ -115,9 +115,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         long startTime = System.nanoTime();
         RoutingRequest carRouteRequest = createCarRouteRequest(request);
         List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
-
-        log.info("\ncalcRoute result: {},\nwith size {} \nfor routerequest {}", planElements, planElements.size(), request);
-
         Routing.Response response = convertToProtoResponse(planElements, requestId);
         responseObserver.onNext(response);
         responseObserver.onCompleted();

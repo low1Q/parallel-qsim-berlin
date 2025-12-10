@@ -29,7 +29,6 @@ import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.RoutingRequest;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.facilities.*;
-import org.matsim.pt.routes.DefaultTransitPassengerRoute;
 import org.matsim.utils.objectattributes.attributable.Attributes;
 import org.matsim.vehicles.*;
 import routing.Routing;
@@ -117,6 +116,8 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         RoutingRequest carRouteRequest = createCarRouteRequest(request);
         List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
 
+        log.info("\ncalcRoute result: {},\nwith size {} \nfor routerequest {}", planElements, planElements.size(), request);
+
         Routing.Response response = convertToProtoResponse(planElements, requestId);
         responseObserver.onNext(response);
         responseObserver.onCompleted();
@@ -174,24 +175,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 .setDistance(leg.getRoute().getDistance());
         leg.getRoute().getTravelTime().ifDefined(d -> protoGenericRoute.setTravTime((int) d));
 
-        if (leg.getRoute() instanceof DefaultTransitPassengerRoute ptRoute) {
-            // PT Route
-            Routing.PtRoute.Builder protoPtRoute = Routing.PtRoute.newBuilder();
-            Routing.PtRouteDescription routeDescription = Routing.PtRouteDescription.newBuilder()
-                    .setAccessFacilityId(ptRoute.getAccessStopId().toString())
-                    .setEgressFacilityId(ptRoute.getEgressStopId().toString())
-                    .setBoardingTime((int) ptRoute.getBoardingTime().orElseThrow(() -> new IllegalArgumentException("PT route must have boarding time")))
-                    .setTransitRouteId(ptRoute.getRouteId().toString())
-                    .setTransitLineId(ptRoute.getLineId().toString()).build();
-
-            protoPtRoute.setInformation(routeDescription);
-
-            protoPtRoute
-                    .setDelegate(protoGenericRoute.build())
-                    .build();
-
-            legBuilder.setPtRoute(protoPtRoute);
-        } else if (leg.getRoute() instanceof NetworkRoute networkRoute) {
+        if (leg.getRoute() instanceof NetworkRoute networkRoute) {
             //Network Route
             Routing.NetworkRoute.Builder protoNetworkRoute = Routing.NetworkRoute.newBuilder();
 
@@ -206,7 +190,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             }
 
             protoNetworkRoute.setDelegate(protoGenericRoute.build());
-
             legBuilder.setNetworkRoute(protoNetworkRoute);
         } else {
             //Generic Route

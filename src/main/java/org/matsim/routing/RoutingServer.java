@@ -63,7 +63,7 @@ public class RoutingServer implements MATSimAppCommand {
         config.qsim().setUsePersonIdForMissingVehicleId(true);
 
         // we do not need counts on the server side
-        config.plans().setInputFile(null);
+//        config.plans().setInputFile(null);
         config.counts().setInputFile(null);
 
         if (localFiles) {

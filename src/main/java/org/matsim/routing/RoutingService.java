@@ -28,11 +28,10 @@ import org.matsim.core.population.routes.NetworkRoute;
 import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.RoutingRequest;
 import org.matsim.core.scenario.ScenarioUtils;
-import org.matsim.facilities.ActivityFacilitiesFactoryImpl;
-import org.matsim.facilities.ActivityFacility;
-import org.matsim.facilities.Facility;
+import org.matsim.facilities.*;
 import org.matsim.pt.routes.DefaultTransitPassengerRoute;
 import org.matsim.utils.objectattributes.attributable.Attributes;
+import org.matsim.vehicles.*;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
@@ -50,7 +49,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private static final Logger log = LogManager.getLogger(RoutingService.class);
-    private final ThreadLocal<RoutingModule> swissRailRaptor;
+    private final ThreadLocal<RoutingModule> carRouter;
     private final ThreadLocal<Scenario> scenario;
     private final Runnable shutdown;
     private final Config config;
@@ -58,20 +57,37 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
     private int lastNow = -1;
 
-    private RoutingService(ThreadLocal<RoutingModule> raptorThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
-        this.swissRailRaptor = raptorThreadLocal;
+    private RoutingService(ThreadLocal<RoutingModule> carRouterThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
+        this.carRouter = carRouterThreadLocal;
         this.scenario = scenarioThreadLocal;
         this.shutdown = shutdown;
         this.config = config;
     }
 
     /**
-     * Initializes the service by loading the Swiss Rail Raptor and scenario.
+     * Initializes the service by loading the car router and scenario.
      * This method should be called before any routing requests are processed.
      */
     public void init() {
-        this.swissRailRaptor.get();
+        this.carRouter.get();
         this.scenario.get();
+        prepareVehicles();
+    }
+
+    private void prepareVehicles() {
+        for (Person person : scenario.get().getPopulation().getPersons().values()) {
+            Id<Vehicle> vehicleId = VehicleUtils.getVehicleId(person, "car");
+            createAndAddVehicleForModeCar(vehicleId, person);
+        }
+    }
+
+    private void createAndAddVehicleForModeCar(Id<Vehicle> vehicleId, Person person) {
+        if (!scenario.get().getVehicles().getVehicles().containsKey(vehicleId)) {
+            Id<VehicleType> carTypeId = Id.create("car", VehicleType.class);
+            VehicleType carType = scenario.get().getVehicles().getVehicleTypes().get(carTypeId);
+            Vehicle vehicle = VehicleUtils.getFactory().createVehicle(VehicleUtils.getVehicleId(person, "car"), carType);
+            scenario.get().getVehicles().addVehicle(vehicle);
+        }
     }
 
     @Override
@@ -98,8 +114,8 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         ByteString requestId = request.getRequestId();
 
         long startTime = System.nanoTime();
-        RoutingRequest raptorRequest = createRaptorRequest(request);
-        List<? extends PlanElement> planElements = swissRailRaptor.get().calcRoute(raptorRequest);
+        RoutingRequest carRouteRequest = createCarRouteRequest(request);
+        List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
 
         Routing.Response response = convertToProtoResponse(planElements, requestId);
         responseObserver.onNext(response);
@@ -178,9 +194,17 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         } else if (leg.getRoute() instanceof NetworkRoute networkRoute) {
             //Network Route
             Routing.NetworkRoute.Builder protoNetworkRoute = Routing.NetworkRoute.newBuilder();
+
+            // Always add start and end link as the rust side expects full route
+            protoNetworkRoute.addRoute(networkRoute.getStartLinkId().toString());
             for (Id<Link> linkId : networkRoute.getLinkIds()) {
                 protoNetworkRoute.addRoute(linkId.toString());
             }
+            // add end link only if it's different from start link (to avoid duplication)
+            if (!(networkRoute.getStartLinkId() ==networkRoute.getEndLinkId())) {
+                protoNetworkRoute.addRoute(networkRoute.getEndLinkId().toString());
+            }
+
             protoNetworkRoute.setDelegate(protoGenericRoute.build());
 
             legBuilder.setNetworkRoute(protoNetworkRoute);
@@ -207,23 +231,35 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     }
 
     @NotNull
-    private RoutingRequest createRaptorRequest(Routing.Request request) {
+    private RoutingRequest createCarRouteRequest(Routing.Request request) {
         Id<Link> fromLink = Id.createLinkId(request.getFromLinkId());
         Id<Link> toLink = Id.createLinkId(request.getToLinkId());
+        String personId = request.getPersonId();
+        Person person;
+
+        if (!personId.isEmpty()) {
+            person = scenario.get().getPopulation().getPersons().get(Id.createPersonId(personId));
+            if (person == null) {
+                throw new IllegalArgumentException("Person with ID " + personId + " not found in scenario.");
+            }
+        } else {
+            System.out.println("PersonId was empty.");
+            person = null;
+        }
 
         return new RoutingRequest() {
             @Override
             public Facility getFromFacility() {
-                Id<ActivityFacility> fromFacility = Id.create("fromFacility", ActivityFacility.class);
+                Id<ActivityFacility> fromFacilityId = Id.create("fromFacility", ActivityFacility.class);
                 Coord from = new Coord(request.getFromX(), request.getFromY());
-                return new ActivityFacilitiesFactoryImpl().createActivityFacility(fromFacility, from, fromLink);
+                return new ActivityFacilitiesFactoryImpl().createActivityFacility(fromFacilityId, from, fromLink);
             }
 
             @Override
             public Facility getToFacility() {
-                Id<ActivityFacility> fromFacility = Id.create("toFacility", ActivityFacility.class);
+                Id<ActivityFacility> toFacilityId = Id.create("toFacility", ActivityFacility.class);
                 Coord from = new Coord(request.getToX(), request.getToY());
-                return new ActivityFacilitiesFactoryImpl().createActivityFacility(fromFacility, from, toLink);
+                return new ActivityFacilitiesFactoryImpl().createActivityFacility(toFacilityId, from, toLink);
             }
 
             @Override
@@ -233,12 +269,12 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
             @Override
             public Person getPerson() {
-                return null;
+                return person;
             }
 
             @Override
             public Attributes getAttributes() {
-                return null;
+                return person.getAttributes();
             }
         };
     }
@@ -296,11 +332,11 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
             // ThreadLocal for Scenario and RoutingModule
             ThreadLocal<Scenario> scenarioThreadLocal = ThreadLocal.withInitial(() -> ScenarioUtils.loadScenario(configThreadLocal.get()));
-            ThreadLocal<RoutingModule> raptorThreadLocal = ThreadLocal.withInitial(() -> {
+            ThreadLocal<RoutingModule> carRouterThreadLocal = ThreadLocal.withInitial(() -> {
                 Scenario scenario = scenarioThreadLocal.get();
-                return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("pt")));
+                return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car")));
             });
-            return new RoutingService(raptorThreadLocal, scenarioThreadLocal, shutdown, config);
+            return new RoutingService(carRouterThreadLocal, scenarioThreadLocal, shutdown, config);
         }
     }
 

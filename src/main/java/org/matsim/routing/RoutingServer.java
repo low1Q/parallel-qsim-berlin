@@ -58,8 +58,11 @@ public class RoutingServer implements MATSimAppCommand {
         }
         config.controller().setOutputDirectory(output);
         config.global().setNumberOfThreads(1); // MATSim internally there should only one thread be used to not mess up with thread local variables
+        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
+        config.network().setInputFile("berlin-v6.4-network.xml.gz");
+        config.qsim().setUsePersonIdForMissingVehicleId(true);
 
-        // we do not need plans and counts on the server side
+        // we do not need counts on the server side
         config.plans().setInputFile(null);
         config.counts().setInputFile(null);
 
@@ -136,9 +139,6 @@ public class RoutingServer implements MATSimAppCommand {
     }
 
     private void adaptToLocalFileNames(Config config) {
-        config.network().setInputFile(fileNameFromUrl(config.network().getInputFile()));
-        config.transit().setTransitScheduleFile(fileNameFromUrl(config.transit().getTransitScheduleFile()));
-        config.transit().setVehiclesFile(fileNameFromUrl(config.transit().getVehiclesFile()));
         config.vehicles().setVehiclesFile(fileNameFromUrl(config.vehicles().getVehiclesFile()));
         config.facilities().setInputFile(fileNameFromUrl(config.facilities().getInputFile()));
     }

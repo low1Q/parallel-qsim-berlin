@@ -49,7 +49,7 @@ public class PreparePopulation implements MATSimAppCommand {
         for (Person person : inputPopulation.getPersons().values()) {
             CleanPopulation.removeUnselectedPlans(person);
             TripStructureUtils.getTrips(person.getSelectedPlan()).stream()
-                    .filter(t -> TripStructureUtils.identifyMainMode(t.getTripElements()).equals("pt"))
+                    .filter(t -> TripStructureUtils.identifyMainMode(t.getTripElements()).equals("car"))
                     .forEach(t -> t.getLegsOnly().getFirst().getAttributes().putAttribute("preplanningHorizon", 10 * 60));
         }
 

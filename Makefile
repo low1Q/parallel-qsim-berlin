@@ -41,17 +41,17 @@ clean:
 $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz: $(op)/berlin-$(BV)-$(PCT)pct.plans.xml.gz $(JAR)
 	$(java_prepare) prepare prepare-population\
 		--input $<\
-		--modes car,walk,ride,bike,freight,truck,pt\
+		--modes car,walk,ride,bike,freight,truck\
 		--horizon $(HORIZON)
 
 $(op)/berlin-$(BV)-$(PCT)pct.plans.xml.gz:
 	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/$(notdir $@) -o $@
 
-$(op)/berlin-$(BV)-transitSchedule.xml.gz:
-	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/$(notdir $@) -o $@
+#$(op)/berlin-$(BV)-transitSchedule.xml.gz:
+#	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/$(notdir $@) -o $@
 
-$(op)/berlin-$(BV)-transitVehicles.xml.gz:
-	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/$(notdir $@) -o $@
+#$(op)/berlin-$(BV)-transitVehicles.xml.gz:
+#	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/$(notdir $@) -o $@
 
 $(op)/berlin-$(BV)-vehicleTypes.xml:
 	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/$(notdir $@) -o $@
@@ -60,12 +60,12 @@ $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml: $(op)/berlin-$(BV)-vehicl
 	$(java_prepare) prepare adapt-vehicle-types\
 		--input $<
 
-$(op)/berlin-$(BV)-network-with-pt.xml.gz:
-	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/berlin-$(BV)-network-with-pt.xml.gz -o $@
+$(op)/berlin-$(BV)-network.xml.gz:
+	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/berlin-$(BV)-network.xml.gz -o $@
 
-$(op)/berlin-$(BV)-network-with-pt-prepared.xml.gz: $(op)/berlin-$(BV)-network-with-pt.xml.gz
-	$(java_prepare) prepare prepare-network\
-		--input $<
+#$(op)/berlin-$(BV)-network-with-pt-prepared.xml.gz: $(op)/berlin-$(BV)-network-with-pt.xml.gz
+#	$(java_prepare) prepare prepare-network\
+#		--input $<
 
 $(op)/berlin-$(BV).config.xml:
 	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/berlin-$(BV).config.xml -o $@
@@ -78,17 +78,16 @@ $(op)/berlin-$(BV).counts-vmz.xml.gz:
 
 # ===== CONVERT TO BINARY PROTOBUF =====
 
-$(op)/binpb/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml $(op)/berlin-$(BV)-network-with-pt-prepared.xml.gz $(op)/berlin-$(BV)-transitSchedule.xml.gz
+$(op)/binpb/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml $(op)/berlin-$(BV)-network.xml.gz
 	if [ "$(MODE)" = "bin" ]; then \
 		RUNNER="$(RUST_BASE)/target/release/convert_to_binary"; \
 	else \
 		RUNNER="cargo run --release --bin convert_to_binary --manifest-path $(RUST_BASE)/Cargo.toml --"; \
 	fi; \
 	eval "$$RUNNER \
-		--network $(op)/berlin-$(BV)-network-with-pt-prepared.xml.gz\
+		--network $(op)/berlin-$(BV)-network.xml.gz\
 		--population $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz\
 		--vehicles $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml\
-		--transit-schedule $(op)/berlin-$(BV)-transitSchedule.xml.gz\
 		--output-dir $(op)\
 		--run-id binpb/berlin-$(BV)-$(PCT)pct"
 
@@ -153,9 +152,9 @@ convert-events:
 router-deps: $(JAR) \
              $(op)/berlin-$(BV).config.xml \
              $(op)/berlin-$(BV)-facilities.xml.gz \
-             $(op)/berlin-$(BV)-network-with-pt.xml.gz \
+             $(op)/berlin-$(BV)-network.xml.gz \
              $(op)/berlin-$(BV)-vehicleTypes.xml \
-             $(op)/berlin-$(BV)-transitVehicles.xml.gz
+
 	@echo "Dependencies for router are up to date."
 
 router: router-deps

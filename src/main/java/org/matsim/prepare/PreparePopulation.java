@@ -46,12 +46,12 @@ public class PreparePopulation implements MATSimAppCommand {
             inputPopulation.removePerson(id);
         }
 
-        for (Person person : inputPopulation.getPersons().values()) {
-            CleanPopulation.removeUnselectedPlans(person);
-            TripStructureUtils.getTrips(person.getSelectedPlan()).stream()
-                    .filter(t -> TripStructureUtils.identifyMainMode(t.getTripElements()).equals("pt"))
-                    .forEach(t -> t.getLegsOnly().getFirst().getAttributes().putAttribute("preplanningHorizon", 10 * 60));
-        }
+//        for (Person person : inputPopulation.getPersons().values()) {
+//            CleanPopulation.removeUnselectedPlans(person);
+//            TripStructureUtils.getTrips(person.getSelectedPlan()).stream()
+//                    .filter(t -> TripStructureUtils.identifyMainMode(t.getTripElements()).equals("pt"))
+//                    .forEach(t -> t.getLegsOnly().getFirst().getAttributes().putAttribute("preplanningHorizon", 10 * 60));
+//        }
 
         log.info("Filtered population contains {} agents", inputPopulation.getPersons().size());
 

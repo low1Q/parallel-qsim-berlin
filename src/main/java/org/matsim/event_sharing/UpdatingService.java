@@ -1,4 +1,4 @@
-package org.matsim.updating;
+package org.matsim.event_sharing;
 
 import com.google.inject.Key;
 import com.google.inject.name.Names;
@@ -20,10 +20,11 @@ import org.matsim.core.config.ConfigUtils;
 import org.matsim.core.config.ConfigWriter;
 import org.matsim.core.controler.ControllerUtils;
 import org.matsim.core.controler.OutputDirectoryHierarchy;
+import org.matsim.core.events.EventsUtils;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
-import updating.EventSharingServiceGrpc;
-import updating.Updating;
+import event_sharing.EventSharingServiceGrpc;
+import event_sharing.EventSharing;
 
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStreamWriter;
@@ -48,10 +49,11 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
     private int lastNow = -1;
 
-    private UpdatingService(ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal, ThreadLocal<EventsManager> eventsManagerThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
+    private UpdatingService(ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal, ThreadLocal<EventsManager> myEventsManagerThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
         this.scenario = scenarioThreadLocal;
         this.travelTimeCalculator = travelTimeCalculatorThreadLocal;
-        this.eventsManager = eventsManagerThreadLocal;
+        //this.eventsManager = eventsManagerThreadLocal;
+        this.eventsManager = myEventsManagerThreadLocal;
         this.shutdown = shutdown;
         this.config = config;
     }
@@ -79,7 +81,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     }
 
     @Override
-    public void updateRouter(Updating.Request request, StreamObserver<Empty> responseObserver) {
+    public void updateRouter(EventSharing.Request request, StreamObserver<EventSharing.Ack> responseObserver) {
         Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
         List<ProfilingEntry> pe = profilingEntries.computeIfAbsent(threadNum, s -> new ArrayList<>());
 
@@ -92,19 +94,25 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 
         long startTime = System.nanoTime();
 
-        if (request.getLinkType().equals("entered link")) {
+        //System.out.println(request);
+
+        if (request.getLinkType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//            System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
             LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-            System.out.println("LinkEnterEvent: " + linkEnterEvent);
+//           System.out.println("LinkEnterEvent: " + linkEnterEvent);
             eventsManager.get().processEvent(linkEnterEvent);
-        } else if (request.getLinkType().equals("left link")) {
+        } else if (request.getLinkType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//            System.out.println(request.getLinkId() + request.getVehicleId() + request.getLinkType());
             LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-            System.out.println("LinkLeftEvent: " + linkLeaveEvent);
+//            System.out.println("LinkLeftEvent: " + linkLeaveEvent);
             eventsManager.get().processEvent(linkLeaveEvent);
         } else {
-            log.warn("Unknown link type: {}", request.getLinkType());
+            System.out.println("ERROR!");
+            log.warn("Error with Event: LinkType: {}, LinkId: {}, VehicleId: {}!", request.getLinkType(), request.getLinkId(), request.getVehicleId());
         }
+        EventSharing.Ack response = EventSharing.Ack.newBuilder().setMessageReceived(true).setRequestId(requestId).build();
 
-        responseObserver.onNext(Empty.getDefaultInstance());
+        responseObserver.onNext(response);
         responseObserver.onCompleted();
 
         long endTime = System.nanoTime();
@@ -174,7 +182,9 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             ThreadLocal<EventsManager> eventsManagerThreadLocal = ThreadLocal.withInitial(() -> {
                 return injectorThreadLocal.get().getInstance(EventsManager.class);
             });
-            return new UpdatingService(travelTimeCalculatorThreadLocal, eventsManagerThreadLocal, scenarioThreadLocal, shutdown, config);
+            //Aus dem Injector holen?
+            ThreadLocal<EventsManager> myEventsManagerThreadLocal = ThreadLocal.withInitial(EventsUtils::createEventsManager);
+            return new UpdatingService(travelTimeCalculatorThreadLocal, myEventsManagerThreadLocal, scenarioThreadLocal, shutdown, config);
         }
     }
 

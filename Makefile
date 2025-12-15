@@ -121,8 +121,8 @@ run-routing: prepare
 	else \
 		ROUTER_URL="http://localhost:50051"; \
 	fi; \
-	$(MAKE) run RUST_BIN=local_qsim_routing ARGS="$(ARGS) --set routing.mode=ad-hoc --router-ip $$ROUTER_URL"
-
+	$(MAKE) run RUST_BIN=local_qsim_routing ARGS="$(ARGS) --router-ip $$ROUTER_URL"
+# --set routing.mode=ad-hoc
 # ===== POST_PROCESSING =====
 
 convert-events:

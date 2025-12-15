@@ -1,4 +1,4 @@
-package org.matsim.updating;
+package org.matsim.event_sharing;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.grpc.Server;
@@ -60,8 +60,14 @@ public class UpdatingServer implements MATSimAppCommand {
         config.global().setNumberOfThreads(1); // MATSim internally there should only one thread be used to not mess up with thread local variables
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         // we do not need plans and counts on the server side
+//        config.plans().setInputFile("berlin-v6.4-1pct.plans.xml.gz");
         config.plans().setInputFile(null);
         config.counts().setInputFile(null);
+
+//        config.scoring().setWriteExperiencedPlans(false);
+//        config.scoring().setFractionOfIterationsToStartScoreMSA(1.0);
+//        config.controller().setWritePlansInterval(0);
+//        config.controller().setLastIteration(0);
 
         if (localFiles) {
             adaptToLocalFileNames(config);

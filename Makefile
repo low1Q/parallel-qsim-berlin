@@ -14,6 +14,7 @@ HORIZON := 600
 java_prepare := java -Xmx$(MEMORY) -XX:+UseParallelGC -cp $(JAR) org.matsim.prepare.RunParallelQSimBerlinPreparation
 # prefer local DTDs to avoid network access (i.e. on hpc clusters)
 java_router := java -Xmx$(MEMORY) -XX:+UseParallelGC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.routing.RoutingServer
+java_updater := java -Xmx$(MEMORY) -XX:+UseParallelGC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.event_sharing.UpdatingServer
 
 p := ./input/$(BV)
 op := ./output/$(BV)/$(PCT)pct
@@ -164,5 +165,25 @@ router: router-deps
 		EXTRA=""; \
 	fi; \
 	CMD="$(java_router) --config $(op)/berlin-$(BV).config.xml --sample $(PCT) --output $(op)/routing-$(RUN_ID) $$EXTRA --localFiles"; \
+	echo "$$CMD"; \
+	eval "$$CMD"
+
+# ===== UPDATER =====
+
+updater-deps: $(JAR) \
+             $(op)/berlin-$(BV).config.xml \
+             $(op)/berlin-$(BV)-facilities.xml.gz \
+             $(op)/berlin-$(BV)-network.xml.gz \
+             $(op)/berlin-$(BV)-vehicleTypes.xml \
+
+	@echo "Dependencies for router are up to date."
+
+updater: updater-deps
+	@if [ -n "$(THREADS)" ]; then \
+		EXTRA="--threads $(THREADS)"; \
+	else \
+		EXTRA=""; \
+	fi; \
+	CMD="$(java_updater) --config $(op)/berlin-$(BV).config.xml --sample $(PCT) --output $(op)/updating-$(RUN_ID) $$EXTRA --localFiles"; \
 	echo "$$CMD"; \
 	eval "$$CMD"

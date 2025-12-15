@@ -57,17 +57,15 @@ public class UpdatingServer implements MATSimAppCommand {
             config.plans().setInputFile(adjustName(config.plans().getInputFile()));
         }
         config.controller().setOutputDirectory(output);
+
         config.global().setNumberOfThreads(1); // MATSim internally there should only one thread be used to not mess up with thread local variables
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
+//        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
+//        config.qsim().setUsePersonIdForMissingVehicleId(true);
         // we do not need plans and counts on the server side
 //        config.plans().setInputFile("berlin-v6.4-1pct.plans.xml.gz");
         config.plans().setInputFile(null);
         config.counts().setInputFile(null);
-
-//        config.scoring().setWriteExperiencedPlans(false);
-//        config.scoring().setFractionOfIterationsToStartScoreMSA(1.0);
-//        config.controller().setWritePlansInterval(0);
-//        config.controller().setLastIteration(0);
 
         if (localFiles) {
             adaptToLocalFileNames(config);

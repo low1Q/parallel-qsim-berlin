@@ -176,7 +176,7 @@ updater-deps: $(JAR) \
              $(op)/berlin-$(BV)-network.xml.gz \
              $(op)/berlin-$(BV)-vehicleTypes.xml \
 
-	@echo "Dependencies for router are up to date."
+	@echo "Dependencies for updater are up to date."
 
 updater: updater-deps
 	@if [ -n "$(THREADS)" ]; then \

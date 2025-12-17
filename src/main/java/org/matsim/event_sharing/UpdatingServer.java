@@ -40,7 +40,7 @@ public class UpdatingServer implements MATSimAppCommand {
     private String output;
 
     @CommandLine.Option(names = "--threads", description = "Number of threads to use for updating")
-    private int numThreads = 1;
+    private int numThreads = 2;
 
     public static void main(String[] args) throws IOException, InterruptedException {
         new UpdatingServer().execute(args);

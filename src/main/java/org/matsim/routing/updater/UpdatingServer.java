@@ -1,4 +1,4 @@
-package org.matsim.routing;
+package org.matsim.routing.updater;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import io.grpc.Server;
@@ -20,9 +20,9 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
-public class RoutingServer implements MATSimAppCommand {
+public class UpdatingServer implements MATSimAppCommand {
     private static final int PORT = 50051;
-    private static final Logger log = LogManager.getLogger(RoutingServer.class);
+    private static final Logger log = LogManager.getLogger(UpdatingServer.class);
 
     private static final Pattern PATTERN = Pattern.compile("\\d+pct");
 
@@ -39,11 +39,11 @@ public class RoutingServer implements MATSimAppCommand {
     @CommandLine.Option(names = "--output", description = "Base output directory for the server", required = true)
     private String output;
 
-    @CommandLine.Option(names = "--threads", description = "Number of threads to use for routing")
+    @CommandLine.Option(names = "--threads", description = "Number of threads to use for updating")
     private int numThreads = 2;
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        new RoutingServer().execute(args);
+        new UpdatingServer().execute(args);
     }
 
     @Override
@@ -57,13 +57,14 @@ public class RoutingServer implements MATSimAppCommand {
             config.plans().setInputFile(adjustName(config.plans().getInputFile()));
         }
         config.controller().setOutputDirectory(output);
-        config.global().setNumberOfThreads(1); // MATSim internally there should only one thread be used to not mess up with thread local variables
-        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
-        config.network().setInputFile("berlin-v6.4-network.xml.gz");
-        config.qsim().setUsePersonIdForMissingVehicleId(true);
 
-        // we do not need counts on the server side
-//        config.plans().setInputFile(null);
+        config.global().setNumberOfThreads(1); // MATSim internally there should only one thread be used to not mess up with thread local variables
+        config.network().setInputFile("berlin-v6.4-network.xml.gz");
+//        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
+//        config.qsim().setUsePersonIdForMissingVehicleId(true);
+        // we do not need plans and counts on the server side
+//        config.plans().setInputFile("berlin-v6.4-1pct.plans.xml.gz");
+        config.plans().setInputFile(null);
         config.counts().setInputFile(null);
 
         if (localFiles) {
@@ -71,11 +72,11 @@ public class RoutingServer implements MATSimAppCommand {
         }
 
         AtomicReference<Server> serverRef = new AtomicReference<>();
-        RoutingService routingService = getRoutingService(serverRef, config);
+        UpdatingService updatingService = getUpdatingService(serverRef, config);
 
-        ExecutorService executor = getExecutorService(routingService);
+        ExecutorService executor = getExecutorService(updatingService);
         Server server = ServerBuilder.forPort(PORT)
-                .addService(routingService)
+                .addService(updatingService)
                 .addService(ProtoReflectionService.newInstance())
                 .executor(executor)
                 .build()
@@ -92,7 +93,7 @@ public class RoutingServer implements MATSimAppCommand {
     }
 
     @NotNull
-    private static RoutingService getRoutingService(AtomicReference<Server> serverRef, Config config) {
+    private static UpdatingService getUpdatingService(AtomicReference<Server> serverRef, Config config) {
         // use a shutdown hook to stop the server gracefully when it gets a shutdown signal
         Runnable shutdown = () -> {
             log.info("Running shutdown hook");
@@ -109,21 +110,21 @@ public class RoutingServer implements MATSimAppCommand {
             }
         };
 
-        return new RoutingService.Factory(config, shutdown).create();
+        return new UpdatingService.Factory(config, shutdown).create();
     }
 
     @NotNull
-    private ExecutorService getExecutorService(RoutingService routingService) throws InterruptedException, ExecutionException {
+    private ExecutorService getExecutorService(UpdatingService updatingService) throws InterruptedException, ExecutionException {
         log.info("Initializing {} threads", numThreads);
 
-        // Create a thread pool with threads initialized with the routing service. This works because the routing service has thread local variables.
+        // Create a thread pool with threads initialized with the updating service. This works because the updating service has thread local variables.
         // (Ahhh, this implicit threading in java is crap... :( paul, sep '25)
-        ThreadFactory factory = new ThreadFactoryBuilder().setNameFormat("router-%d").build();
+        ThreadFactory factory = new ThreadFactoryBuilder().setNameFormat("updater-%d").build();
         var executor = Executors.newFixedThreadPool(numThreads, factory);
         var futures = new ArrayList<Future<?>>();
         for (int i = 0; i < numThreads; i++) {
             // Eagerly initialize ThreadLocals for all threads
-            futures.add(executor.submit(routingService::init));
+            futures.add(executor.submit(updatingService::init));
         }
         for (var f : futures) f.get();
         return executor;
@@ -139,6 +140,9 @@ public class RoutingServer implements MATSimAppCommand {
     }
 
     private void adaptToLocalFileNames(Config config) {
+//        config.network().setInputFile(fileNameFromUrl(config.network().getInputFile()));
+//        config.transit().setTransitScheduleFile(fileNameFromUrl(config.transit().getTransitScheduleFile()));
+//        config.transit().setVehiclesFile(fileNameFromUrl(config.transit().getVehiclesFile()));
         config.vehicles().setVehiclesFile(fileNameFromUrl(config.vehicles().getVehiclesFile()));
         config.facilities().setInputFile(fileNameFromUrl(config.facilities().getInputFile()));
     }

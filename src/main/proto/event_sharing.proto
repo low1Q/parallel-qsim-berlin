@@ -1,0 +1,26 @@
+syntax = "proto3";
+package event_sharing;
+
+import "google/protobuf/empty.proto";
+
+service EventSharingService {
+  rpc UpdateRouter(Request) returns (Ack);
+  rpc UpdateRouterBatch(BatchRequest) returns (Ack);
+  rpc Shutdown (google.protobuf.Empty) returns (google.protobuf.Empty);
+}
+message Request {
+  string link_type = 1;
+  string link_id = 2;
+  string vehicle_id = 3;
+  uint32 now = 4;
+  bytes request_id = 5;
+}
+
+message BatchRequest {
+  repeated Request requests = 1;
+}
+
+message Ack {
+  bool message_received = 1;
+  bytes request_id = 2;
+}

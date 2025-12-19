@@ -1,4 +1,4 @@
-package org.matsim.routing;
+package org.matsim.routing.router;
 
 import com.google.inject.Key;
 import com.google.inject.name.Names;

@@ -1,4 +1,4 @@
-package org.matsim.routing;
+package org.matsim.routing.router;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;

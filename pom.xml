@@ -25,7 +25,7 @@
         <!-- Don't modify this, change the parent version instead! -->
         <matsim.version>${project.parent.version}</matsim.version>
 
-        <main.class>org.matsim.routing.RoutingServer</main.class>
+        <main.class>org.matsim.routing.router.RoutingServer</main.class>
 
         <maven.compiler.release>21</maven.compiler.release>
 

@@ -1,0 +1,40 @@
+package org.matsim.routing.updater.travel_time_snapshot;
+
+import org.matsim.api.core.v01.Id;
+import org.matsim.api.core.v01.network.Link;
+import org.matsim.api.core.v01.network.Network;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Immutable mapping from Link Id to dense integer index.
+ * Built once at startup.
+ */
+public final class LinkIndexMapping {
+
+    private final Map<Id<Link>, Integer> linkId2Index;
+    private final int size;
+
+    public LinkIndexMapping(Network network) {
+        this.linkId2Index = new HashMap<>(network.getLinks().size());
+
+        int idx = 0;
+        for (Link link : network.getLinks().values()) {
+            linkId2Index.put(link.getId(), idx++);
+        }
+        this.size = idx;
+    }
+
+    public int getIndex(Link link) {
+        Integer idx = linkId2Index.get(link.getId());
+        if (idx == null) {
+            throw new IllegalArgumentException("Unknown link: " + link.getId());
+        }
+        return idx;
+    }
+
+    public int size() {
+        return size;
+    }
+}

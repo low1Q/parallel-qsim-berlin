@@ -10,6 +10,7 @@ import org.jetbrains.annotations.NotNull;
 import org.matsim.application.MATSimAppCommand;
 import org.matsim.core.config.Config;
 import org.matsim.core.config.ConfigUtils;
+import org.matsim.routing.router.RoutingService;
 import picocli.CommandLine;
 
 import java.io.IOException;

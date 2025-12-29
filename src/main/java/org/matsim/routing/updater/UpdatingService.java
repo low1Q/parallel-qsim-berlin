@@ -1,7 +1,5 @@
 package org.matsim.routing.updater;
 
-import com.google.inject.Key;
-import com.google.inject.name.Names;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import io.grpc.stub.StreamObserver;
@@ -13,92 +11,63 @@ import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.events.LinkEnterEvent;
 import org.matsim.api.core.v01.events.LinkLeaveEvent;
+import org.matsim.api.core.v01.events.VehicleEntersTrafficEvent;
+import org.matsim.api.core.v01.events.VehicleLeavesTrafficEvent;
 import org.matsim.api.core.v01.network.Link;
-import org.matsim.api.core.v01.population.Person;
 import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.core.config.Config;
-import org.matsim.core.config.ConfigReader;
-import org.matsim.core.config.ConfigUtils;
-import org.matsim.core.config.ConfigWriter;
-import org.matsim.core.controler.ControllerUtils;
-import org.matsim.core.controler.OutputDirectoryHierarchy;
-import org.matsim.core.events.EventsUtils;
-import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
 import event_sharing.EventSharingServiceGrpc;
-import event_sharing.EventSharing;
 import event_sharing.EventSharing.*;
-import org.matsim.vehicles.*;
 
-import java.io.ByteArrayOutputStream;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
 import java.math.BigInteger;
-import java.net.URL;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
 public class UpdatingService extends EventSharingServiceGrpc.EventSharingServiceImplBase {
     private static final Logger log = LogManager.getLogger(UpdatingService.class);
     private final ThreadLocal<Scenario> scenario;
-    private final ThreadLocal<TravelTimeCalculator> travelTimeCalculator;
-    private final ThreadLocal<EventsManager> eventsManager;
+    private final TravelTimeCalculator sharedTravelTimeCalculator;
+    private final EventsManager sharedEventsManager;
+    //private final ThreadLocal<SimpleTravelTimeAggregator> aggregator;
     private final Runnable shutdown;
     private final Config config;
     private final ConcurrentMap<String, Integer> threadNums = new ConcurrentHashMap<>();
     private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
     private int lastNow = -1;
+    private long now = 0;
+    private final ExecutorService updaterExecutor;
+    // globaler Zähler: wie oft LinkEnter für denselben Link aufgetreten ist, seit letztem LinkLeave
+    private final ConcurrentMap<String, Integer> linkEnterCountsSinceLastLeave = new ConcurrentHashMap<>();
 
-//    private UpdatingService(ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal, ThreadLocal<EventsManager> eventsManagerThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
-//        this.scenario = scenarioThreadLocal;
-//        this.travelTimeCalculator = travelTimeCalculatorThreadLocal;
-//        this.eventsManager = eventsManagerThreadLocal;
-//        this.shutdown = shutdown;
-//        this.config = config;
-//    }
-
-    public UpdatingService(ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal,
-                           ThreadLocal<EventsManager> eventsManagerThreadLocal,
+    public UpdatingService(TravelTimeCalculator sharedTravelTimeCalculator,
+                           EventsManager sharedEventsManager,
                            ThreadLocal<Scenario> scenarioThreadLocal,
                            Runnable shutdown,
-                           Config config) {
+                           Config config,
+                           ExecutorService updaterExecutor) {
         this.scenario = scenarioThreadLocal;
-        this.travelTimeCalculator = travelTimeCalculatorThreadLocal;
-        this.eventsManager = eventsManagerThreadLocal;
+        this.sharedTravelTimeCalculator = sharedTravelTimeCalculator;
+        this.sharedEventsManager = sharedEventsManager;
         this.shutdown = shutdown;
         this.config = config;
+        this.updaterExecutor = updaterExecutor;
     }
-
-//    private void prepareVehicles() {
-//        for (Person person : scenario.get().getPopulation().getPersons().values()) {
-//            Id<Vehicle> vehicleId = VehicleUtils.getVehicleId(person, "car");
-//            createAndAddVehicleForModeCar(vehicleId, person);
-//        }
-//    }
-//
-//    private void createAndAddVehicleForModeCar(Id<Vehicle> vehicleId, Person person) {
-//        if (!scenario.get().getVehicles().getVehicles().containsKey(vehicleId)) {
-//            Id<VehicleType> carTypeId = Id.create("car", VehicleType.class);
-//            VehicleType carType = scenario.get().getVehicles().getVehicleTypes().get(carTypeId);
-//            Vehicle vehicle = VehicleUtils.getFactory().createVehicle(VehicleUtils.getVehicleId(person, "car"), carType);
-//            scenario.get().getVehicles().addVehicle(vehicle);
-//        }
-//    }
 
     /**
      * Initializes the service by loading the Travel Time Calculator, Events Manager and scenario.
      * This method should be called before any updating requests are processed.
      */
     public void init() {
-        this.travelTimeCalculator.get();
-        this.eventsManager.get();
+        //this.sharedTravelTimeCalculator;
         this.scenario.get();
-        eventsManager.get().addHandler(travelTimeCalculator.get());
-//        prepareVehicles();
+        //eventsManager.get().addHandler(travelTimeCalculator.get());
+        //eventsManager.get().addHandler(aggregator.get());
     }
 
     Map<String, Integer> linkCountsGlobal = new HashMap<>();
@@ -110,9 +79,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 
         Map<String, Integer> linkCounts = new HashMap<>();
         int linkCountMax = 0;
-        int linkCountMaxMinus1 = 0;
         String linkIdMax = null;
-        String linkIdMaxMinus1 = null;
 
         for (Map.Entry<String, Integer> e : linkCountsGlobal.entrySet()) {
             if (e.getValue() > linkCountMax) {
@@ -120,26 +87,29 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
                 linkIdMax = e.getKey();
             }
         }
-        linkCountsGlobal.remove(linkIdMax, linkCountMax);
-        for (Map.Entry<String, Integer> e : linkCountsGlobal.entrySet()) {
-            if (e.getValue() > linkCountMaxMinus1) {
-                linkCountMaxMinus1 = e.getValue();
-                linkIdMaxMinus1 = e.getKey();
-            }
-        }
 
         // linkCountMax enthält jetzt die höchste Häufigkeit, linkIdMax die entsprechende LinkId
-        log.info("Most frequent link {} occurred {} times and second most frequent link {} occured {} times.", linkIdMax, linkCountMax, linkIdMaxMinus1, linkCountMaxMinus1);
+        log.info("Most frequent link {} occurred {} times.", linkIdMax, linkCountMax);
 
+        assert linkIdMax != null;
         Link link = scenario.get().getNetwork().getLinks().get(Id.createLinkId(linkIdMax));
-        Link toLink = scenario.get().getNetwork().getLinks().get(Id.createLinkId(linkIdMaxMinus1));
 
-        //double linkToLinkTravelTime = travelTimeCalculator.get().getLinkToLinkTravelTimes().getLinkToLinkTravelTime(link, toLink, lastNow, null, null);
-        double t1 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, 0, null, null);
-        double t2 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, lastNow / 2.0, null, null);
-        double t3 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, lastNow, null, null);
-        System.out.println("TravelTime start/middle/end: " + t1 + "\n" + t2 + "\n" + t3);
-        //System.out.println("Link to Link TravelTime after: " + linkToLinkTravelTime);
+        double t1 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, 0, null, null);
+        double t2 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, now / 2.0, null, null);
+        double t3 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, now, null, null);
+        double t4 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, 27232, null, null);
+
+//        double t1 = aggregator.get().getSnapshotForTime(0).getLinkTravelTime(link, 0, null, null);
+//        double t2 = aggregator.get().getSnapshotForTime(now / 2.0).getLinkTravelTime(link, now / 2.0, null, null);
+//        double t3 = aggregator.get().getSnapshotForTime(now).getLinkTravelTime(link, now, null, null);
+//        double t4 = aggregator.get().getSnapshotForTime(27232).getLinkTravelTime(link, 27232, null, null);
+
+        System.out.println("Final TravelTime start/middle/end/27232: " + t1 + "\t" + t2 + "\t" + t3 + "\t" + t4);
+//      Final TravelTime start/middle/end/27232: 13.338	14.0	13.338	31.122
+//      2025-12-28T14:36:24,740  INFO UpdatingService:97 Most frequent link 462101683 occurred 540 times.
+//      Final TravelTime start/middle/end/27232: 13.338	14.0	13.338	21.381
+//      2025-12-28T14:38:51,213  INFO UpdatingService:98 Most frequent link 253772079 occurred 542 times.
+//      Final TravelTime start/middle/end/27232: 13.477	14.0	13.477	87.331
 
         log.info("Shutting down updating service");
         responseObserver.onNext(Empty.getDefaultInstance());
@@ -148,81 +118,113 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     }
 
     @Override
+    public void updateRouterSingleEvent(Request request, StreamObserver<Ack> responseObserver) {
+        Future<Ack> fut = updaterExecutor.submit(() -> {
+
+            processEvent(request);
+
+            // nehme Zeit der letzten Request im Batch als Snapshot-Zeit
+//            int snapshotTime = 0;
+//            snapshotTime = request.getNow();
+//            // Erzeuge zeitabhängigen Snapshot
+//            aggregator.get().updateSnapshot(snapshotTime);
+
+            now = request.getNow();
+
+            return Ack.newBuilder().
+                    setMessageReceived(true).
+                    build();
+        });
+        try {
+            Ack response = fut.get(); // blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            responseObserver.onError(e);
+        }
+    }
+
+    @Override
     public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Ack> responseObserver) {
-        Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
+        Future<Ack> fut = updaterExecutor.submit(() -> {
+//            Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
 //        List<ProfilingEntry> pe = profilingEntries.computeIfAbsent(threadNum, s -> new ArrayList<>());
 
-//        Map<String, Integer> linkCounts = new HashMap<>();
-//        int linkCountMax = 0;
-//        int linkCountMaxMinus1 = 0;
-//        String linkIdMax = null;
-//        String linkIdMaxMinus1 = null;
+//            Map<String, Integer> linkCounts = new HashMap<>();
+//            int linkCountMax = 0;
+//            String linkIdMax = null;
 
 //        long startTime = System.nanoTime();
-        for (Request request : batchRequest.getRequestsList()) {
-            if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
-                log.info("Received event for Router update for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
-                lastNow = request.getNow();
+            // Kopiere und sortiere die Requests nach Zeit (aufsteigend), stabile Sortierung bewahrt Reihenfolge bei gleicher Zeit
+//            List<Request> requests = new ArrayList<>(batchRequest.getRequestsList());
+//            requests.sort(Comparator.comparingLong(Request::getNow));
+//            System.out.println(requests);
+            for (Request request : batchRequest.getRequestsList()) {
+//                if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
+//                    log.info("Received event for Router update for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
+//                    lastNow = request.getNow();
+//                }
+
+                // Zähle Link-IDs im aktuellen Batch und bestimme Maximalwert + zugehörige LinkId
+
+                String linkId = request.getLinkId();
+//              linkCounts.merge(linkId, 1, Integer::sum);
+                linkCountsGlobal.merge(linkId, 1, Integer::sum);
+
+//                for (Map.Entry<String, Integer> e : linkCounts.entrySet()) {
+//                    if (e.getValue() > linkCountMax) {
+//                        linkCountMax = e.getValue();
+//                        linkIdMax = e.getKey();
+//                    }
+//                }
+                processEvent(request);
             }
 
-            // Zähle Link-IDs im aktuellen Batch und bestimme Maximalwert + zugehörige LinkId
+            // nehme Zeit der letzten Request im Batch als Snapshot-Zeit
+//            int snapshotTime = 0;
+//            if (!batchRequest.getRequestsList().isEmpty()) {
+//                snapshotTime = batchRequest.getRequestsList().getLast().getNow();
+//            }
+//            // Erzeuge zeitabhängigen Snapshot
+//            aggregator.get().updateSnapshot(snapshotTime);
 
-            String linkId = request.getLinkId();
-            if (linkId.isEmpty()) continue;
-//            linkCounts.merge(linkId, 1, Integer::sum);
-            linkCountsGlobal.merge(linkId, 1, Integer::sum);
+            now = batchRequest.getRequestsList().getLast().getNow();
+
+//            // linkCountMax enthält jetzt die höchste Häufigkeit, linkIdMax die entsprechende LinkId
+//            log.info("Most frequent link {} occurred {} times.", linkIdMax, linkCountMax);
 //
-//            for (Map.Entry<String, Integer> e : linkCounts.entrySet()) {
-//                if (e.getValue() > linkCountMax) {
-//                    linkCountMax = e.getValue();
-//                    linkIdMax = e.getKey();
-//                }
-//            }
-//            linkCounts.remove(linkIdMax, linkCountMax);
-//            for (Map.Entry<String, Integer> e : linkCounts.entrySet()) {
-//                if (e.getValue() > linkCountMaxMinus1) {
-//                    linkCountMaxMinus1 = e.getValue();
-//                    linkIdMaxMinus1 = e.getKey();
-//                }
-//            }
+//            assert linkIdMax != null;
+//            Link link = scenario.get().getNetwork().getLinks().get(Id.createLinkId(linkIdMax));
+//
+//            double t1 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, 0, null, null);
+//            double t2 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, now / 2.0, null, null);
+//            double t3 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, now, null, null);
+//            double t4 = sharedTravelTimeCalculator.getLinkTravelTimes().getLinkTravelTime(link, 27232, null, null);
 
-            if (request.getLinkType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-//            System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
-                LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-//                System.out.println("LinkEnterEvent: " + linkEnterEvent);
-                eventsManager.get().processEvent(linkEnterEvent);
-            } else if (request.getLinkType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-//            System.out.println(request.getLinkId() + request.getVehicleId() + request.getLinkType());
-                LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-//                System.out.println("LinkLeftEvent: " + linkLeaveEvent);
-                eventsManager.get().processEvent(linkLeaveEvent);
-            } else {
-                log.warn("Error with Event: LinkType: {}, LinkId: {}, VehicleId: {}!", request.getLinkType(), request.getLinkId(), request.getVehicleId());
-            }
+//            double t1 = aggregator.get().getSnapshotForTime(0).getLinkTravelTime(link, 0, null, null);
+//            double t2 = aggregator.get().getSnapshotForTime(now / 2.0).getLinkTravelTime(link, now / 2.0, null, null);
+//            double t3 = aggregator.get().getSnapshotForTime(now).getLinkTravelTime(link, now, null, null);
+//            double t4 = aggregator.get().getSnapshotForTime(27232).getLinkTravelTime(link, 27232, null, null);
+
+//            System.out.println("TravelTime start/middle/end/27232: " + t1 + "\t" + t2 + "\t" + t3 + "\t" + t4);
+
+
+            return Ack.newBuilder()
+                    .setMessageReceived(true)
+                    .setRequestId(batchRequest.getRequestsList().isEmpty() ? ByteString.EMPTY : batchRequest.getRequestId())
+                    .build();
+        });
+
+        try {
+            Ack response = fut.get(); // blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+
+        } catch (Exception e) {
+            System.out.println("Exception in updateRouterBatch: " + e.getMessage());
+            responseObserver.onError(e);
         }
 
-        Ack response = Ack.newBuilder()
-                .setMessageReceived(true)
-                .setRequestId(batchRequest.getRequestsList().getFirst().getRequestId())
-                .build();
-
-        responseObserver.onNext(response);
-
-        responseObserver.onCompleted();
-
-        // linkCountMax enthält jetzt die höchste Häufigkeit, linkIdMax die entsprechende LinkId
-//        log.info("Most frequent link {} occurred {} times and second most frequent link {} occured {} times.", linkIdMax, linkCountMax, linkIdMaxMinus1, linkCountMaxMinus1);
-//
-//        Link link = scenario.get().getNetwork().getLinks().get(Id.createLinkId(linkIdMax));
-//        Link toLink = scenario.get().getNetwork().getLinks().get(Id.createLinkId(linkIdMaxMinus1));
-//
-//        //double linkToLinkTravelTime = travelTimeCalculator.get().getLinkToLinkTravelTimes().getLinkToLinkTravelTime(link, toLink, lastNow, null, null);
-//        double t1 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, 0, null, null);
-//        double t2 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, lastNow / 2.0, null, null);
-//        double t3 = travelTimeCalculator.get().getLinkTravelTimes().getLinkTravelTime(link, lastNow, null, null);
-//
-//        System.out.println("TravelTime start/middle/end: " + t1 + "\n" + t2 + "\n" + t3);
-//
 //        long endTime = System.nanoTime();
 
         //double durationMs = (endTime - startTime) / 1_000_000.0;
@@ -237,6 +239,41 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //            var p = new ProfilingEntry(threadNum, request.getNow(), request.getLinkType(), request.getLinkId(), request.getVehicleId(), startTime, endTime - startTime, requestId);
 //            pe.add(p);
 //        }
+    }
+
+    private void processEvent(Request request) {
+        if (request.getEventType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+            // Zähler pro Link erhöhen
+            int cnt = linkEnterCountsSinceLastLeave.merge(request.getVehicleId(), 1, Integer::sum);
+            if (cnt > 1) {
+                log.warn("VehicleId {} received {} consecutive LinkEnter events without LinkLeave for time {}.", request.getVehicleId(), cnt, request.getNow());
+            }
+//          System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
+            LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
+//              System.out.println("LinkEnterEvent: " + linkEnterEvent);
+            sharedEventsManager.processEvent(linkEnterEvent);
+        } else if (request.getEventType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+            linkEnterCountsSinceLastLeave.remove(request.getVehicleId());
+//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
+            LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
+//              System.out.println("LinkLeaveEvent: " + linkLeaveEvent);
+            sharedEventsManager.processEvent(linkLeaveEvent);
+        } else if (request.getEventType().equals("vehicle enters traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
+            VehicleEntersTrafficEvent vehicleEntersTrafficEvent = new VehicleEntersTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
+                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
+//              System.out.println("VehicleEntersTrafficEvent: " + vehicleEntersTrafficEvent);
+            sharedEventsManager.processEvent(vehicleEntersTrafficEvent);
+        } else if (request.getEventType().equals("vehicle leaves traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
+            VehicleLeavesTrafficEvent vehicleLeavesTrafficEvent = new VehicleLeavesTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
+                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
+//              System.out.println("VehicleLeavesTrafficEvent: " + vehicleLeavesTrafficEvent);
+            sharedEventsManager.processEvent(vehicleLeavesTrafficEvent);
+        } else {
+            log.warn("Error with Event: LinkType: {}, LinkId: {}, VehicleId: {}!", request.getEventType(), request.getLinkId(), request.getVehicleId());
+        }
+
     }
 
     private void writeProfilingEntries() {
@@ -268,41 +305,87 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         }
     }
 
-    public record Factory(Config config, Runnable shutdown) {
-        public UpdatingService create() {
-            config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
-
-            // Serialize config to byte array and create ThreadLocal copies
-            // This is necessary because the config is modified during scenario loading (consistency checks are added in Constructor of NewControler),
-            // consequently java.util.ConcurrentModificationException MIGHT be thrown (not always)
-            URL context = config.getContext();
-            ByteArrayOutputStream stream = new ByteArrayOutputStream();
-            Writer writer = new OutputStreamWriter(stream);
-            new ConfigWriter(config).writeStream(writer);
-            AtomicReference<byte[]> byteArray = new AtomicReference<>(stream.toByteArray());
-
-            ThreadLocal<Config> configThreadLocal = ThreadLocal.withInitial(() -> {
-                Config cfg = ConfigUtils.createConfig();
-                ConfigReader reader = new ConfigReader(cfg);
-                reader.readStream(new java.io.ByteArrayInputStream(byteArray.get()));
-                cfg.setContext(context);
-                return cfg;
-            });
-
-            // ThreadLocal for Scenario and UpdatingService
-            ThreadLocal<Scenario> scenarioThreadLocal = ThreadLocal.withInitial(() -> ScenarioUtils.loadScenario(configThreadLocal.get()));
-            ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal = ThreadLocal.withInitial(() -> {
-                Scenario scenario = scenarioThreadLocal.get();
-                return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
-            });
-            ThreadLocal<EventsManager> eventsManagerThreadLocal = ThreadLocal.withInitial(EventsUtils::createEventsManager);
-            return new UpdatingService(travelTimeCalculatorThreadLocal, eventsManagerThreadLocal, scenarioThreadLocal, shutdown, config);
-        }
-    }
+//    public record Factory(Config config, Runnable shutdown) {
+//        public UpdatingService create() {
+//            config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
+//
+//            // Serialize config to byte array and create ThreadLocal copies
+//            // This is necessary because the config is modified during scenario loading (consistency checks are added in Constructor of NewControler),
+//            // consequently java.util.ConcurrentModificationException MIGHT be thrown (not always)
+//            URL context = config.getContext();
+//            ByteArrayOutputStream stream = new ByteArrayOutputStream();
+//            Writer writer = new OutputStreamWriter(stream);
+//            new ConfigWriter(config).writeStream(writer);
+//            AtomicReference<byte[]> byteArray = new AtomicReference<>(stream.toByteArray());
+//
+//            ThreadLocal<Config> configThreadLocal = ThreadLocal.withInitial(() -> {
+//                Config cfg = ConfigUtils.createConfig();
+//                ConfigReader reader = new ConfigReader(cfg);
+//                reader.readStream(new java.io.ByteArrayInputStream(byteArray.get()));
+//                cfg.setContext(context);
+//                return cfg;
+//            });
+//
+//            // ThreadLocal for Scenario and UpdatingService
+//            ThreadLocal<Scenario> scenarioThreadLocal = ThreadLocal.withInitial(() -> ScenarioUtils.loadScenario(configThreadLocal.get()));
+//            ThreadLocal<TravelTimeCalculator> travelTimeCalculatorThreadLocal = ThreadLocal.withInitial(() -> {
+//                Scenario scenario = scenarioThreadLocal.get();
+//                return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
+//            });
+//            ThreadLocal<EventsManager> eventsManagerThreadLocal = ThreadLocal.withInitial(EventsUtils::createEventsManager);
+//            return new UpdatingService(travelTimeCalculatorThreadLocal, eventsManagerThreadLocal, scenarioThreadLocal, shutdown, config, null);
+//        }
+//    }
 
     private record ProfilingEntry(int thread, int simulationNow, String linkType, String linkId, String vehicleId,
                                   long start, long duration,
                                   ByteString requestId) {
 
     }
+
+    private static void pairEnterLeave(List<Request> requests) {
+        // key = vehicleId|linkId
+        Map<String, Integer> openEnters = new HashMap<>();
+        for (int i = 0; i < requests.size(); i++) {
+            Request r = requests.get(i);
+            if (!"entered link".equals(r.getEventType()) && !"left link".equals(r.getEventType())) {
+                continue;
+            }
+            String key = r.getVehicleId() + "|" + r.getLinkId();
+
+            if ("entered link".equals(r.getEventType())) {
+                openEnters.merge(key, 1, Integer::sum);
+            } else { // left link
+                Integer cnt = openEnters.getOrDefault(key, 0);
+                if (cnt > 0) {
+                    // vorhandenes Enter vorhanden -> konsumiere es
+                    if (cnt == 1) openEnters.remove(key); else openEnters.put(key, cnt - 1);
+                } else {
+                    // kein vorheriges Enter: suche nächstes Enter und verschiebe es an Position i
+                    int found = -1;
+                    for (int j = i + 1; j < requests.size(); j++) {
+                        Request r2 = requests.get(j);
+                        if ("entered link".equals(r2.getEventType())
+                                && r.getVehicleId().equals(r2.getVehicleId())
+                                && r.getLinkId().equals(r2.getLinkId())) {
+                            found = j;
+                            break;
+                        }
+                    }
+                    if (found != -1) {
+                        Request enterReq = requests.remove(found);
+                        requests.add(i, enterReq); // verschiebe Enter vor die Leave
+                        // nun zählt das enter als geöffnet; erhöhe Zähler entsprechend
+                        openEnters.merge(key, 1, Integer::sum);
+                        // i bleibt auf der Leave-Position +1 im nächsten Loop-Schritt; der gerade eingefügte Enter wurde bereits vor der Leave platziert
+                    } else {
+                        // kein passendes Enter gefunden: logge kurz, lasse Leave stehen
+                        // (alternativ: droppen oder anderweitig behandeln)
+                         System.out.println("Unpaired leave found for " + key + " at index " + i);
+                    }
+                }
+            }
+        }
+    }
+
 }

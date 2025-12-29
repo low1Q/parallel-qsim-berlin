@@ -4,28 +4,31 @@ package event_sharing;
 import "google/protobuf/empty.proto";
 
 service EventSharingService {
-  rpc UpdateRouter(Request) returns (google.protobuf.Empty);
-  rpc UpdateRouterBatch(BatchRequest) returns (google.protobuf.Empty);
+  rpc UpdateRouterSingleEvent(Request) returns (Ack);
+  rpc UpdateRouterBatch(BatchRequest) returns (Ack);
   rpc Shutdown (google.protobuf.Empty) returns (google.protobuf.Empty);
 }
 message Request {
-  LinkType link_type = 1;
+  string event_type = 1;
   string link_id = 2;
   string vehicle_id = 3;
   uint32 now = 4;
-  bytes request_id = 5;
+  optional string network_mode = 5;
+  optional string driver_id = 6;
+  optional double relative_position_on_link = 7;
 }
 
-enum LinkType {
-  LINK_LEAVE_EVENT = 0;
-  LINK_ENTER_EVENT = 1;
-}
+//enum LinkType {
+//  LINK_LEAVE_EVENT = 0;
+//  LINK_ENTER_EVENT = 1;
+//}
 
 message BatchRequest {
   repeated Request requests = 1;
+  optional bytes request_id = 2;
 }
 
-//message Ack {
-//  bool message_received = 1;
-//  bytes request_id = 2;
-//}
+message Ack {
+  bool message_received = 1;
+  optional bytes request_id = 2;
+}

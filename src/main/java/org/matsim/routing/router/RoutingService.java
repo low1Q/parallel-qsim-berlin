@@ -1,6 +1,6 @@
 package org.matsim.routing.router;
 
-import com.google.inject.Inject;
+import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.name.Names;
 import com.google.protobuf.ByteString;
@@ -14,26 +14,26 @@ import org.jetbrains.annotations.NotNull;
 import org.matsim.api.core.v01.Coord;
 import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
+import org.matsim.api.core.v01.TransportMode;
 import org.matsim.api.core.v01.network.Link;
-import org.matsim.api.core.v01.population.Activity;
-import org.matsim.api.core.v01.population.Leg;
-import org.matsim.api.core.v01.population.Person;
-import org.matsim.api.core.v01.population.PlanElement;
+import org.matsim.api.core.v01.population.*;
 import org.matsim.core.config.Config;
 import org.matsim.core.config.ConfigReader;
 import org.matsim.core.config.ConfigUtils;
 import org.matsim.core.config.ConfigWriter;
 import org.matsim.core.controler.*;
 import org.matsim.core.population.routes.NetworkRoute;
+import org.matsim.core.router.DefaultRoutingRequest;
+import org.matsim.core.router.MultimodalLinkChooser;
 import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.RoutingRequest;
-import org.matsim.core.router.costcalculators.TravelDisutilityFactory;
-import org.matsim.core.router.util.LeastCostPathCalculatorFactory;
-import org.matsim.core.router.util.TravelTime;
+import org.matsim.core.router.speedy.SpeedyHPCBridge;
+import org.matsim.core.router.util.LeastCostPathCalculator;
+import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.scenario.ScenarioUtils;
+import org.matsim.core.utils.timing.TimeInterpretation;
 import org.matsim.facilities.*;
 import org.matsim.utils.objectattributes.attributable.Attributes;
-import org.matsim.vehicles.*;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
@@ -45,23 +45,29 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private static final Logger log = LogManager.getLogger(RoutingService.class);
-    private final ThreadLocal<RoutingModule> carRouter;
-    private final ThreadLocal<Scenario> scenario;
-    private final RoutingModule sharedCarRouter;
+    //private final ThreadLocal<RoutingModule> accessEgressCarRouter;
+    private final ThreadLocal<RoutingModule> routingModulePool;
+    private final Scenario scenario;
+    private final Injector adhocInjector;
+    private final HighPerformanceTravelTime sharedTravelTime;
     private final Runnable shutdown;
     private final Config config;
     private final ConcurrentMap<String, Integer> threadNums = new ConcurrentHashMap<>();
     private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
     private int lastNow = -1;
-    @Inject LeastCostPathCalculatorFactory pathCalculatorFactory;
-    @Inject private Map<String, TravelTime> travelTime ;
-    @Inject private Map<String, TravelDisutilityFactory> travelDisutilityFactories ;
+    private final TravelDisutility travelDisutility;
+    private final Object landmarks; // Als Object speichern
+    private final Map<String, Id<Link>> linkIdCache;
+    private final Map<String, Person> personCache;
+    //private final ThreadLocal<LeastCostPathCalculator> routerPool;
 
 //    private RoutingService(ThreadLocal<RoutingModule> carRouterThreadLocal, ThreadLocal<Scenario> scenarioThreadLocal, Runnable shutdown, Config config) {
 //        this.carRouter = carRouterThreadLocal;
@@ -70,42 +76,104 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 //        this.config = config;
 //    }
 
-    public RoutingService(RoutingModule sharedCarRouter,
-                          ThreadLocal<RoutingModule> carRouter,
-                          ThreadLocal<Scenario> scenarioThreadLocal,
-                          Runnable shutdown,
-                          Config config) {
-        this.sharedCarRouter = sharedCarRouter;
-        this.carRouter = carRouter;
-        this.scenario = scenarioThreadLocal;
+    public RoutingService(Scenario sharedScenario,
+                          Injector adhocInjector, Runnable shutdown,
+                          Config config,
+                          HighPerformanceTravelTime sharedTravelTime,
+                          Object sharedLandmarks,
+                          TravelDisutility staticDisutility,
+                          Map<String, Id<Link>> linkIdCache, Map<String, Person> personCache) {
+        this.scenario = sharedScenario;
+        this.adhocInjector = adhocInjector;
         this.shutdown = shutdown;
         this.config = config;
+        this.sharedTravelTime = sharedTravelTime;
+        this.travelDisutility = staticDisutility;
+        this.landmarks = sharedLandmarks;
+        this.linkIdCache = linkIdCache;
+        this.personCache = personCache;
+
+        // Hier definieren wir, was passiert, wenn ein Thread zum ersten Mal einen Router braucht
+//        Injector adhocInjector = ControllerUtils.createAdhocInjector(scenario);
+//        TravelDisutilityFactory travelDisutilityFactory = adhocInjector.getInstance(Key.get
+//                (TravelDisutilityFactory.class, Names.named("car")));
+//        this.travelDisutility =
+//                travelDisutilityFactory.createTravelDisutility(sharedTravelTime);
+//        this.routerPool = ThreadLocal.withInitial(() -> {
+//            log.info("Initializing persistent SpeedyALT router for thread: {}", Thread.currentThread().getName());
+//            return SpeedyHPCBridge.createRouter(landmarks, sharedTravelTime, travelDisutility);
+//        });
+//        this.routerPool = ThreadLocal.withInitial(() -> {
+//            log.info("Initializing persistent SpeedyALT router for thread: {}", Thread.currentThread().getName());
+//            return new SpeedyALTFactory().createPathCalculator(
+//                    scenario.getNetwork(),
+//                    travelDisutility,
+//                    sharedTravelTime
+//            );
+//        });
+
+//        this.accessEgressCarRouter = ThreadLocal.withInitial(() -> {
+//            log.info("Initializing persistent accesEgressCarRouter router for thread: {}", Thread.currentThread().getName());
+//            return adhocInjector.getInstance(Key.get(RoutingModule.class, Names.named("car")));
+//        });
+        this.routingModulePool = ThreadLocal.withInitial(() -> {
+            // 1. Create the FAST Router using shared memory landmarks
+            // This is the core 'car' logic you pre-calculated
+            LeastCostPathCalculator carAlgo = SpeedyHPCBridge.createRouter(
+                    sharedLandmarks,
+                    sharedTravelTime,
+                    staticDisutility
+            );
+
+            // 2. Resolve lightweight helpers from the adhocInjector
+            // Since 'walk' is teleported in your config, this is safe and fast
+            RoutingModule walkRouter = adhocInjector.getInstance(
+                    com.google.inject.Key.get(RoutingModule.class, com.google.inject.name.Names.named(TransportMode.walk))
+            );
+
+            Scenario scenario = adhocInjector.getInstance(Scenario.class);
+            TimeInterpretation timeInterpretation = adhocInjector.getInstance(TimeInterpretation.class);
+            MultimodalLinkChooser linkChooser = adhocInjector.getInstance(MultimodalLinkChooser.class);
+
+            // 3. Official Factory Call
+            // This internally creates the NetworkRoutingInclAccessEgressModule
+            // but handles the package-private visibility for you.
+            return org.matsim.core.router.DefaultRoutingModules.createAccessEgressNetworkRouter(
+                    TransportMode.car,
+                    carAlgo,
+                    scenario,
+                    scenario.getNetwork(), // filteredNetwork
+                    walkRouter,           // The access/egress 'walk' router
+                    timeInterpretation,
+                    linkChooser
+            );
+        });
     }
 
     /**
-     * Initializes the service by loading the car router and scenario.
-     * This method should be called before any routing requests are processed.
+     * Forces the initialization of ThreadLocal MATSim components for all pool threads.
      */
-    public void init() {
-        this.carRouter.get();
-        this.scenario.get();
-        prepareVehicles();
-    }
+    public void warmUpPool() {
+        int parallelism = routingPool.getParallelism();
+        log.info("Starting eager warmup of {} ForkJoinPool threads...", parallelism);
 
-    private void prepareVehicles() {
-        for (Person person : scenario.get().getPopulation().getPersons().values()) {
-            Id<Vehicle> vehicleId = VehicleUtils.getVehicleId(person, "car");
-            createAndAddVehicleForModeCar(vehicleId, person);
-        }
-    }
+        // We submit a task for every core to ensure every thread in the pool gets hit
+        List<CompletableFuture<Void>> warmers = new ArrayList<>();
 
-    private void createAndAddVehicleForModeCar(Id<Vehicle> vehicleId, Person person) {
-        if (!scenario.get().getVehicles().getVehicles().containsKey(vehicleId)) {
-            Id<VehicleType> carTypeId = Id.create("car", VehicleType.class);
-            VehicleType carType = scenario.get().getVehicles().getVehicleTypes().get(carTypeId);
-            Vehicle vehicle = VehicleUtils.getFactory().createVehicle(VehicleUtils.getVehicleId(person, "car"), carType);
-            scenario.get().getVehicles().addVehicle(vehicle);
+        for (int i = 0; i < parallelism; i++) {
+            warmers.add(CompletableFuture.runAsync(() -> {
+                // Accessing the .get() methods triggers the ThreadLocal initialValue()
+                // This loads the Scenario and creates the AdhocInjector
+                //routerPool.get();
+                //accessEgressCarRouter.get();
+                routingModulePool.get();
+                log.info("Thread {} is now warmed up and ready.", Thread.currentThread().getName());
+            }, routingPool));
         }
+
+        // Wait for all threads to finish loading heavy objects
+        CompletableFuture.allOf(warmers.toArray(new CompletableFuture[0])).join();
+        log.info("All routing threads initialized and landmarks loaded.");
     }
 
     @Override
@@ -119,33 +187,89 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         new Thread(shutdown).start();
     }
 
+    private final ForkJoinPool routingPool = new ForkJoinPool(
+            Runtime.getRuntime().availableProcessors(),
+            ForkJoinPool.defaultForkJoinWorkerThreadFactory,
+            null, true // async mode for better throughput
+    );
+
     @Override
     public void getRoute(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
-        Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
-        List<ProfilingEntry> pe = profilingEntries.computeIfAbsent(threadNum, s -> new ArrayList<>());
-
-        if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
-            log.info("Received route request for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
-            lastNow = request.getNow();
-        }
-
-        ByteString requestId = request.getRequestId();
-
         long startTime = System.nanoTime();
-        RoutingRequest carRouteRequest = createCarRouteRequest(request);
-//        TravelTime travelTimee = travelTime.get( TransportMode.car );
-//        TravelDisutility travelDisutility = travelDisutilityFactories.get( TransportMode.car ).createTravelDisutility( travelTime.get( TransportMode.car ) ) ;
-//        LeastCostPathCalculator pathCalculator = pathCalculatorFactory.createPathCalculator(scenario.get().getNetwork(), travelDisutility, travelTimee );
-        List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
-        Routing.Response response = convertToProtoResponse(planElements, requestId);
-        responseObserver.onNext(response);
-        responseObserver.onCompleted();
+        routingPool.submit(() -> {
+            try {
+                // 1. Identify Thread
+                Integer threadNum = threadNums.computeIfAbsent(
+                        Thread.currentThread().getName(),
+                        s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1))
+                );
 
-        long endTime = System.nanoTime();
 
-        int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
-        var p = new ProfilingEntry(threadNum, request.getNow(), request.getDepartureTime(), request.getFromLinkId(), request.getToLinkId(), startTime, endTime - startTime, travelTimes, requestId);
-        pe.add(p);
+                if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
+                    log.info("Received route request for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
+                    lastNow = request.getNow();
+                }
+                ByteString requestId = request.getRequestId();
+
+                Id<Link> fromLink = linkIdCache.get(request.getFromLinkId());
+                Id<Link> toLink = linkIdCache.get(request.getToLinkId());
+                String personId = request.getPersonId();
+                Person person;
+
+                if (!personId.isEmpty()) {
+                    person = personCache.get(personId);
+                    if (person == null) {
+                        throw new IllegalArgumentException("Person with ID " + personId + " not found in scenario.");
+                    }
+                } else {
+                    System.out.println("PersonId was empty.");
+                    person = null;
+                }
+
+                request.getDepartureTime();
+                person.getAttributes();
+                //                return facilityCache.get(fromLink);
+                Id<ActivityFacility> fromFacilityId = Id.create("fromFacility", ActivityFacility.class);
+                Coord from = new Coord(request.getFromX(), request.getFromY());
+                Facility fromFacility = new ActivityFacilitiesFactoryImpl().createActivityFacility(fromFacilityId, from, fromLink);
+
+
+
+
+                //return facilityCache.get(toLink);
+                Id<ActivityFacility> toFacilityId = Id.create("toFacility", ActivityFacility.class);
+                Coord to = new Coord(request.getToX(), request.getToY());
+                Facility toFacility = new ActivityFacilitiesFactoryImpl().createActivityFacility(toFacilityId, to, toLink);
+                RoutingRequest test = DefaultRoutingRequest.of(fromFacility, toFacility,
+                        request.getDepartureTime(), person, person.getAttributes());
+
+                RoutingRequest carRouteRequest = createCarRouteRequest(request);
+                //List<? extends PlanElement> planElements = accessEgressCarRouter.get().calcRoute(carRouteRequest);
+                List<? extends PlanElement> planElements = routingModulePool.get().calcRoute(test);
+                //System.out.println(planElements.get(2).toString());
+                Routing.Response response = convertToProtoResponse(planElements, requestId);
+                //Routing.Response response = null;
+                responseObserver.onNext(response);
+                responseObserver.onCompleted();
+
+                // 5. Profiling (Inside the block!)
+                long endTime = System.nanoTime();
+                int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
+
+                var p = new ProfilingEntry(
+                        threadNum, request.getNow(), request.getDepartureTime(),
+                        request.getFromLinkId(), request.getToLinkId(),
+                        startTime, endTime - startTime, travelTimes, request.getRequestId()
+                );
+                profilingEntries.computeIfAbsent(threadNum, k -> new ArrayList<>()).add(p);
+            } catch (Exception e) {
+                log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage());
+                // This is vital: Rust is waiting for this message!
+                responseObserver.onError(io.grpc.Status.INTERNAL
+                        .withDescription("Routing failed in Java: " + e.getMessage())
+                        .asException());
+            }
+        });
     }
 
     private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, ByteString requestId) {
@@ -175,16 +299,17 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
         for (Map.Entry<String, Object> stringObjectEntry : leg.getAttributes().getAsMap().entrySet()) {
             Object value = stringObjectEntry.getValue();
-            if (value instanceof String) {
-                legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setStringValue((String) value).build());
-            } else if (value instanceof Double) {
-                legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setDoubleValue((Double) value).build());
-            } else if (value instanceof Integer) {
-                legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setIntValue((Integer) value).build());
-            } else if (value instanceof Boolean) {
-                legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setBoolValue((Boolean) value).build());
-            } else {
-                throw new IllegalArgumentException("Unsupported attribute type: " + value.getClass().getName());
+            switch (value) {
+                case String s ->
+                        legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setStringValue(s).build());
+                case Double v ->
+                        legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setDoubleValue(v).build());
+                case Integer i ->
+                        legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setIntValue(i).build());
+                case Boolean b ->
+                        legBuilder.putAttributes(stringObjectEntry.getKey(), Routing.AttributeValue.newBuilder().setBoolValue(b).build());
+                default ->
+                        throw new IllegalArgumentException("Unsupported attribute type: " + value.getClass().getName());
             }
         }
 
@@ -204,7 +329,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 protoNetworkRoute.addRoute(linkId.toString());
             }
             // add end link only if it's different from start link (to avoid duplication)
-            if (!(networkRoute.getStartLinkId() ==networkRoute.getEndLinkId())) {
+            if (!(networkRoute.getStartLinkId() == networkRoute.getEndLinkId())) {
                 protoNetworkRoute.addRoute(networkRoute.getEndLinkId().toString());
             }
 
@@ -234,13 +359,13 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
     @NotNull
     private RoutingRequest createCarRouteRequest(Routing.Request request) {
-        Id<Link> fromLink = Id.createLinkId(request.getFromLinkId());
-        Id<Link> toLink = Id.createLinkId(request.getToLinkId());
+        Id<Link> fromLink = linkIdCache.get(request.getFromLinkId());
+        Id<Link> toLink = linkIdCache.get(request.getToLinkId());
         String personId = request.getPersonId();
         Person person;
 
         if (!personId.isEmpty()) {
-            person = scenario.get().getPopulation().getPersons().get(Id.createPersonId(personId));
+            person = personCache.get(personId);
             if (person == null) {
                 throw new IllegalArgumentException("Person with ID " + personId + " not found in scenario.");
             }
@@ -252,6 +377,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         return new RoutingRequest() {
             @Override
             public Facility getFromFacility() {
+//                return facilityCache.get(fromLink);
                 Id<ActivityFacility> fromFacilityId = Id.create("fromFacility", ActivityFacility.class);
                 Coord from = new Coord(request.getFromX(), request.getFromY());
                 return new ActivityFacilitiesFactoryImpl().createActivityFacility(fromFacilityId, from, fromLink);
@@ -259,6 +385,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
             @Override
             public Facility getToFacility() {
+                //return facilityCache.get(toLink);
                 Id<ActivityFacility> toFacilityId = Id.create("toFacility", ActivityFacility.class);
                 Coord from = new Coord(request.getToX(), request.getToY());
                 return new ActivityFacilitiesFactoryImpl().createActivityFacility(toFacilityId, from, toLink);
@@ -292,7 +419,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         List<ProfilingEntry> allEntries = this.profilingEntries.values().stream().flatMap(Collection::stream).sorted(Comparator.comparingInt(e -> e.simulationNow)).toList();
 
         try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(outputFile));
-             CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder().setHeader("thread", "now", "departure_time", "from", "to", "start", "duration_ns", "travel_time_s", "request_id").build())) {
+             CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder().setHeader("thread", "now", "departure_time", "from", "to", "start", "duration_ns", "travel_time_s", "request_id").get())) {
             for (ProfilingEntry profilingEntry : allEntries) {
                 csv.printRecord(
                         profilingEntry.thread,
@@ -311,6 +438,45 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             throw new RuntimeException(e);
         }
     }
+
+//    public record Factory(Config config, Runnable shutdown) {
+//
+//        public RoutingService create() {
+//            // 1. Zentrale Ressourcen EINMALIG laden (Shared across all threads)
+//            Scenario sharedScenario = ScenarioUtils.loadScenario(config);
+//            Network network = sharedScenario.getNetwork();
+//
+//            // 2. High-Performance Komponenten initialisieren
+//            HighPerformanceTravelTime sharedTravelTime = new HighPerformanceTravelTime(network);
+//            TravelDisutility sharedDisutility = new OnlyTimeDependentTravelDisutilityFactory()
+//                    .createTravelDisutility(sharedTravelTime);
+//
+//            // 3. Speedy-Infrastruktur vorbereiten
+//            SpeedyGraph speedyGraph = SpeedyGraphBuilder.build(network, null);
+//
+//            // Landmarken auf Basis von Free-Speed berechnen (einmalig)
+//            Object sharedLandmarks = SpeedyHPCBridge.createLandmarks(
+//                    speedyGraph, 16,
+//                    new OnlyTimeDependentTravelDisutilityFactory().createTravelDisutility(sharedTravelTime.getStaticFreeSpeedView())
+//            );
+//
+//            // 4. Schnelle Lookups vorbereiten
+//            Map<String, Node> linkToNodeMap = new HashMap<>();
+//            for (Link link : network.getLinks().values()) {
+//                linkToNodeMap.put(link.getId().toString(), link.getToNode());
+//            }
+//
+//            // 5. Den Service erstellen
+//            // Der Service bekommt die shared Objekte und regelt den Router-Pool intern per ThreadLocal
+//            return new RoutingService(
+//                    linkToNodeMap,
+//                    sharedLandmarks,
+//                    sharedTravelTime,
+//                    sharedDisutility,
+//                    shutdown
+//            );
+//        }
+//    }
 
     public record Factory(Config config, Runnable shutdown) {
         public RoutingService create() {
@@ -340,7 +506,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car")));
             });
             // ThreadLocal Router für "car"
-            return new RoutingService(null, carRouterThreadLocal, scenarioThreadLocal, shutdown, config);
+            return new RoutingService(null, null, null, null, null, null, null, null, null);
         }
     }
 

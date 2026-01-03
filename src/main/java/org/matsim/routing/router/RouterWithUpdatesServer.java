@@ -8,42 +8,28 @@ import com.google.inject.Injector;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.protobuf.services.ProtoReflectionService;
-import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.matsim.MyIdStoreDeserializer;
 import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.network.Link;
-import org.matsim.api.core.v01.network.Network;
-import org.matsim.api.core.v01.network.Node;
 import org.matsim.api.core.v01.population.Person;
 import org.matsim.application.MATSimAppCommand;
 import org.matsim.core.config.Config;
 import org.matsim.core.config.ConfigUtils;
-import org.matsim.core.config.groups.QSimConfigGroup;
 import org.matsim.core.config.groups.RoutingConfigGroup;
 import org.matsim.core.controler.*;
-import org.matsim.core.controler.corelisteners.ControlerDefaultCoreListenersModule;
-import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.costcalculators.OnlyTimeDependentTravelDisutilityFactory;
-import org.matsim.core.router.speedy.SpeedyALTFactory;
 import org.matsim.core.router.speedy.SpeedyGraph;
 import org.matsim.core.router.speedy.SpeedyGraphBuilder;
 import org.matsim.core.router.speedy.SpeedyHPCBridge;
-import org.matsim.core.router.util.LeastCostPathCalculatorFactory;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.router.util.TravelTime;
-import org.matsim.core.scenario.ScenarioByInstanceModule;
 import org.matsim.core.scenario.ScenarioUtils;
-import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
-import org.matsim.core.events.EventsUtils;
-import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.api.core.v01.Scenario;
-import com.google.inject.Key;
-import com.google.inject.name.Names;
 
 import org.matsim.facilities.ActivityFacilitiesFactory;
-import org.matsim.facilities.ActivityFacility;
-import org.matsim.facilities.Facility;
+import org.matsim.facilities.ActivityFacilitiesFactoryImpl;
 import org.matsim.routing.updater.UpdatingService;
 import org.matsim.vehicles.Vehicle;
 import org.matsim.vehicles.VehicleType;
@@ -55,7 +41,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
@@ -109,11 +94,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.global().setInsistingOnDeprecatedConfigVersion(false);
         System.setProperty("matsim.preferLocalDtds", "true");
 
-        // In deiner Main-Methode oder dort, wo du das Controler-Setup hast:
-        //Controler controler = new Controler(config);
-
-//        config.qsim().setSnapshotStyle(QSimConfigGroup.SnapshotStyle.queue);
-//        config.controller().setLastIteration(0);
+        config.controller().setLastIteration(0);
 
         if (localFiles) {
             adaptToLocalFileNames(config);
@@ -121,10 +102,18 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
         // Lade ein einzelnes Scenario, EventsManager und TravelTimeCalculator und teile sie
         Scenario sharedScenario = ScenarioUtils.loadScenario(config);
+        ActivityFacilitiesFactory sharedFacilitiesFactory = new ActivityFacilitiesFactoryImpl();
         Injector adhocInjector = ControllerUtils.createAdhocInjector(sharedScenario);
+        String idStorePath = "output/v6.4/1pct/binpb-hor600/berlin-v6.4-1pct.ids.binpb";
 
         // 2. Deine High-Performance TravelTime
-        HighPerformanceTravelTime sharedTravelTime = new HighPerformanceTravelTime(sharedScenario.getNetwork());
+// Laden des gesamten Stores
+        Map<Long, List<String>> sharedStore = MyIdStoreDeserializer.loadIdStore(Path.of(idStorePath));
+
+// Extraktion der Link-IDs (Typ-ID 3 laut deinem Rust-Code)
+        List<String> linkIdsFromRust = sharedStore.get(3L); // 3L ist LINK_TYPE_ID
+        TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork(), linkIdsFromRust);
+
 
         // 1. Initialisierung beim Server-Start
         log.info("Pre-calculating SpeedyALT landmarks...");
@@ -139,31 +128,126 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
         prepareVehicles(sharedScenario);
 
-        //RoutingModule pro Thread erzeugen, verwendet aber dasselbe Scenario
-//        ThreadLocal<RoutingModule> routerModuleTL = ThreadLocal.withInitial(() ->
-//                sharedAdhocInjector.getInstance(Key.get(RoutingModule.class, Names.named("car")))
-//        );
-//        RoutingModule sharedCarRouter = sharedAdhocInjector.getInstance(Key.get(RoutingModule.class, Names.named("car")));
-
 // Store the actual Link objects.
 // This is faster because Network.getLinks().get() requires an Id object,
 // but this map allows you to use the raw String from your gRPC request.
         log.info("Creating fast lookup maps...");
         Map<String, Id<Link>> linkIdCache = new HashMap<>();
-
         for (Id<Link> id : sharedScenario.getNetwork().getLinks().keySet()) {
             linkIdCache.put(id.toString(), id);
         }
+//        Map<String, Id<Person>> personIdCache = new HashMap<>();
+//        for (Id<Person> personId : sharedScenario.getPopulation().getPersons().keySet()) {
+//            personIdCache.put(personId.toString(), personId);
+//        }
         Map<String, Person> personCache = new HashMap<>();
         for (Person p : sharedScenario.getPopulation().getPersons().values()) {
             personCache.put(p.getId().toString(), p);
         }
-       Map<String, Id<Vehicle>> vehicleIdCache = new HashMap<>();
+//        Map<String, Id<Vehicle>> vehicleIdCache = new HashMap<>();
+//        for (Id<Vehicle> id : sharedScenario.getVehicles().getVehicles().keySet()) {
+//            vehicleIdCache.put(id.toString(), id);
+//        }
 
-            // Cache all Vehicle IDs if you have a fixed fleet
-            for (Id<Vehicle> id : sharedScenario.getVehicles().getVehicles().keySet()) {
-                vehicleIdCache.put(id.toString(), id);
+// 2. Link-Mapping (Bereits vorhanden)
+        List<String> linkStrings = sharedStore.get(MyIdStoreDeserializer.LINK_TYPE_ID);
+        Link[] indexToLink = new Link[linkStrings.size()];
+        Id<Link>[] indexToLinkId = new Id[linkStrings.size()]; // Optional: Falls man oft nur die ID braucht
+        for (int i = 0; i < linkStrings.size(); i++) {
+            Id<Link> mId = Id.createLinkId(linkStrings.get(i));
+            indexToLinkId[i] = mId;
+            indexToLink[i] = sharedScenario.getNetwork().getLinks().get(mId);
+        }
+
+// 3. Personen-Mapping (Rust StableTypeId PERSON_TYPE_ID = 2)
+        List<String> personStrings = sharedStore.get(MyIdStoreDeserializer.PERSON_TYPE_ID);
+
+// Array für die Ids (Leichtgewichtig, oft für gRPC-Antworten oder Events benötigt)
+        Id<Person>[] indexToPersonId = new Id[personStrings.size()];
+
+// Array für die tatsächlichen Person-Objekte (Um auf Attribute/Pläne zuzugreifen)
+        Person[] indexToPerson = new Person[personStrings.size()];
+
+        for (int i = 0; i < personStrings.size(); i++) {
+            String pString = personStrings.get(i);
+            Id<Person> pId = Id.createPersonId(pString);
+
+            indexToPersonId[i] = pId;
+
+            // Wir holen die Person aus der MATSim-Population des Scenarios
+            Person person = sharedScenario.getPopulation().getPersons().get(pId);
+            indexToPerson[i] = person;
+
+            if (person == null) {
+                // Optional: Ein kurzer Check verhindert NullPointerExceptions später im Service
+                log.warn("Person {} in ID-Store gefunden, aber fehlt in der MATSim-Population!", pString);
             }
+        }
+
+// 4. Vehicle-Mapping (Rust StableTypeId VEHICLE_TYPE_ID = 6)
+        List<String> vehicleStrings = sharedStore.get(MyIdStoreDeserializer.VEHICLE_TYPE_ID);
+
+        Id<Vehicle>[] indexToVehicleId = new Id[vehicleStrings.size()];
+        Vehicle[] indexToVehicle = new Vehicle[vehicleStrings.size()];
+
+        for (int i = 0; i < vehicleStrings.size(); i++) {
+            // Die String-ID aus der Liste holen
+            String vehicleStringId = vehicleStrings.get(i);
+
+            // MATSim Id Objekt erstellen
+            Id<Vehicle> vId = Id.createVehicleId(vehicleStringId);
+
+            // In beiden Arrays speichern
+            indexToVehicleId[i] = vId;
+            indexToVehicle[i] = sharedScenario.getVehicles().getVehicles().get(vId);
+
+            // Optionaler Check: Falls ein Fahrzeug in der .ids.binpb steht,
+            // aber nicht im MATSim-Scenario geladen wurde
+            if (indexToVehicle[i] == null) {
+                String vIdStr = vehicleStrings.get(i);
+                // Nur warnen, wenn es kein Walk/Bike/PT Fahrzeug ist
+                if (!vIdStr.contains("walk") && !vIdStr.contains("bike") && !vIdStr.contains("pt")) {
+                    log.warn("Vehicle {} exists in ID-Store but not in Scenario!", vIdStr);
+                }
+            }
+        }
+
+        //       log.info("Preparing HPC Index Tables...");
+
+// 1. Links
+//        int numLinks = sharedScenario.getNetwork().getLinks().size();
+//        Link[] indexToLink = new Link[numLinks];
+//        Id<Link>[] indexToLinkId = new Id[numLinks];
+//        Map<String, Integer> linkToIndex = sharedTravelTime.getStringIdToIndex();
+//
+//        for (Link link : sharedScenario.getNetwork().getLinks().values()) {
+//            int idx = linkToIndex.get(link.getId().toString());
+//            indexToLink[idx] = link;
+//            indexToLinkId[idx] = link.getId();
+//        }
+//
+// 2. Personen
+//        int numPersons = sharedScenario.getPopulation().getPersons().size();
+//        Person[] indexToPerson = new Person[numPersons];
+// Map, um dem Client einmalig die Indices mitzuteilen (oder falls Strings reinkommen)
+//        Map<String, Integer> personToIndex = new HashMap<>();
+//        int pIdx = 0;
+//        for (Person p : sharedScenario.getPopulation().getPersons().values()) {
+//            indexToPerson[pIdx] = p;
+//            personToIndex.put(p.getId().toString(), pIdx);
+//            pIdx++;
+//        }
+//
+// 3. Fahrzeuge (analog zu Personen)
+//        int numVehicles = sharedScenario.getVehicles().getVehicles().size();
+//        Vehicle[] indexToVehicle = new Vehicle[numVehicles];
+//        Map<String, Integer> vehicleToIndex = new HashMap<>();
+//        int vIdx = 0;
+//        for (Vehicle v : sharedScenario.getVehicles().getVehicles().values()) {
+//            indexToVehicle[vIdx] = v;
+//            vehicleToIndex.put(v.getId().toString(), vIdx);
+//            vIdx++;
+//        }
 
 
         // 1. Definiere die spezialisierten Worker-Pools
@@ -172,10 +256,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
                 numRoutingThreads,
                 new ThreadFactoryBuilder().setNameFormat("router-pool-%d").build()
         );
-
-        // Dedizierter Single-Thread-Executor nur für UpdatingService
-//        ThreadFactoryBuilder updTf = new ThreadFactoryBuilder().setNameFormat("updater-%d");
-//        ExecutorService updaterExecutor = Executors.newSingleThreadExecutor(updTf.build());
 
         // Update-Thread (Schreib-Zugriffe: IMMER Single-Threaded!)
         ExecutorService updaterExecutor = Executors.newSingleThreadExecutor(
@@ -189,30 +269,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         };
 
         AtomicReference<Server> serverRef = new AtomicReference<>();
-        // shutdown hook erweitern: beide Executor runterfahren
-//        Runnable serverShutdown = () -> {
-//            Server s = serverRef.get();
-//            if (s != null) {
-//                s.shutdown();
-//                try {
-//                    if (!s.awaitTermination(10, TimeUnit.SECONDS)) s.shutdownNow();
-//                } catch (InterruptedException e) {
-//                    s.shutdownNow();
-//                    Thread.currentThread().interrupt();
-//                }
-//            }
-//            // updater executor beenden
-//            updaterExecutor.shutdown();
-//            rpcExecutor.shutdown();
-//            try {
-//                if (!updaterExecutor.awaitTermination(5, TimeUnit.SECONDS)) updaterExecutor.shutdownNow();
-//                if (!rpcExecutor.awaitTermination(5, TimeUnit.SECONDS)) rpcExecutor.shutdownNow();
-//            } catch (InterruptedException e) {
-//                updaterExecutor.shutdownNow();
-//                rpcExecutor.shutdownNow();
-//                Thread.currentThread().interrupt();
-//            }
-//        };
 
         // 1. Definiere die Logik für das saubere Aufräumen
         Runnable serverShutdown = () -> {
@@ -222,8 +278,11 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             Server s = serverRef.get();
             if (s != null) {
                 s.shutdown();
-                try { if (!s.awaitTermination(5, TimeUnit.SECONDS)) s.shutdownNow(); }
-                catch (InterruptedException e) { s.shutdownNow(); }
+                try {
+                    if (!s.awaitTermination(5, TimeUnit.SECONDS)) s.shutdownNow();
+                } catch (InterruptedException e) {
+                    s.shutdownNow();
+                }
             }
 
             // Pools stoppen (Wichtig für HPC!)
@@ -243,10 +302,10 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // (Hier einfache Zuordnung)
         //noinspection LawOfDemeter
         UpdatingService updatingService = new UpdatingService(sharedScenario, adhocInjector,
-                serverShutdown, config, updaterExecutor, sharedTravelTime, linkIdCache, vehicleIdCache);
+                serverShutdown, config, updaterExecutor, sharedTravelTime, indexToLinkId, indexToVehicleId, indexToPersonId, indexToLink);
         //noinspection LawOfDemeter
-        RoutingService routingService = new RoutingService(sharedScenario, adhocInjector,
-                serverShutdown, config, sharedTravelTime, sharedLandmarks, staticDisutility,linkIdCache, personCache);
+        RoutingService routingService = new RoutingService(sharedScenario, adhocInjector, serverShutdown, config,
+                sharedTravelTime, sharedLandmarks, staticDisutility, sharedFacilitiesFactory, indexToLinkId, indexToLink, indexToPerson);
         log.info("Starting sequential warm-up for {} routing threads...", numRoutingThreads);
 
         try {
@@ -261,21 +320,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             log.error("Critical failure during HPC Warmup. Aborting startup.", e);
             System.exit(1);
         }
-
-//        for (int threadId = 0; threadId < numRoutingThreads; threadId++) {
-//            try {
-//                log.info("Initializing thread {} of {}...", threadId + 1, numRoutingThreads);
-//
-//                // .submit() schickt die Aufgabe an den Pool
-//                // .get() wartet blockierend, bis dieser EINE Thread fertig ist
-//                rpcExecutor.submit(routingService::init).get();
-//
-//                log.info("Thread {} is ready.", threadId + 1);
-//            } catch (Exception e) {
-//                log.error("Failed to initialize thread " + threadId, e);
-//                // Optional: System.exit(1), da der Server sonst instabil wäre
-//            }
-//        }
 
         log.info("All threads initialized sequentially. Starting gRPC server...");
 

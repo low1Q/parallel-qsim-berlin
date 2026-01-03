@@ -16,13 +16,14 @@ import org.matsim.api.core.v01.events.LinkLeaveEvent;
 import org.matsim.api.core.v01.events.VehicleEntersTrafficEvent;
 import org.matsim.api.core.v01.events.VehicleLeavesTrafficEvent;
 import org.matsim.api.core.v01.network.Link;
+import org.matsim.api.core.v01.population.Person;
 import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.core.config.Config;
 import org.matsim.core.events.EventsUtils;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
 import event_sharing.EventSharingServiceGrpc;
 import event_sharing.EventSharing.*;
-import org.matsim.routing.router.HighPerformanceTravelTime;
+import org.matsim.routing.router.TravelTimeSnapshot;
 import org.matsim.vehicles.Vehicle;
 
 //import java.io.BufferedWriter;
@@ -44,12 +45,12 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final Injector adhocInjector;
     private final TravelTimeCalculator travelTimeCalculator;
     private final EventsManager eventsManager;
-    private final HighPerformanceTravelTime sharedTravelTime;
+    private final TravelTimeSnapshot sharedTravelTime;
     //private final ThreadLocal<SimpleTravelTimeAggregator> aggregator;
     private final Runnable shutdown;
     private final Config config;
     private final ConcurrentMap<String, Integer> threadNums = new ConcurrentHashMap<>();
-//    private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
+    //    private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
 //    private int lastNow = -1;
     private long now = 0;
     private final ExecutorService updaterExecutor;
@@ -57,53 +58,47 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final ConcurrentMap<String, Integer> linkEnterCountsSinceLastLeave = new ConcurrentHashMap<>();
     private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
     private final double[] internalTravelTimes;         // Das Arbeits-Array
-    private final Map<String, Id<Link>> linkIdCache;
-    private final Map<String, Id<Vehicle>> vehicleIdCache;
+    private final Link[] indexToLink;
+    private final Id<Link>[] indexToLinkId;
+    private final Id<Vehicle>[] indexToVehicleId;
+    private final Id<Person>[] indexToPersonId;
 
     public UpdatingService(Scenario sharedScenario,
                            Injector adhocInjector, Runnable shutdown,
                            Config config,
                            ExecutorService updaterExecutor,
-                           HighPerformanceTravelTime sharedTravelTime,
-                           Map<String, Id<Link>> linkIdCache, Map<String, Id<Vehicle>> vehicleIdCache) {
+                           TravelTimeSnapshot sharedTravelTime,
+                           Id<Link>[] indexToLinkId, Id<Vehicle>[] indexToVehicleId, Id<Person>[] indexToPersonId, Link[] indexToLink) {
         this.scenario = sharedScenario;
         this.adhocInjector = adhocInjector;
         this.shutdown = shutdown;
         this.config = config;
         this.updaterExecutor = updaterExecutor;
         this.sharedTravelTime = sharedTravelTime;
-        this.linkIdCache = linkIdCache;
-        this.vehicleIdCache = vehicleIdCache;
-
-//        // 1. TTC und EventsManager hier drin erstellen
-//// 1. Hole die Werte für unsere eigene Logik
-//        TravelTimeCalculatorConfigGroup ttcConfig = config.travelTimeCalculator();
-//        double binSize = ttcConfig.getTraveltimeBinSize();
-//        int maxTime = ttcConfig.getMaxTime();
-//// 1. Builder instanziieren
-//        TravelTimeCalculator.Builder builder = new TravelTimeCalculator.Builder(scenario.getNetwork());
-//// 2. Werte setzen (Vorsicht bei void-Methoden)
-//        builder.setTimeslice(binSize);
-//        builder.setMaxTime(maxTime); // Diese Methode ist void!
-//        builder.setCalculateLinkTravelTimes(ttcConfig.isCalculateLinkTravelTimes());
-//        builder.setCalculateLinkToLinkTravelTimes(ttcConfig.isCalculateLinkToLinkTravelTimes());
-//
-//// 3. Falls du die "configure" Logik aus der ConfigGroup übernehmen willst (wichtig für den Getter-Typ!):
-//        builder.configure(ttcConfig);
-//// 4. Endlich bauen
-//        this.travelTimeCalculator = builder.build();
+        this.indexToLinkId = indexToLinkId;
+        this.indexToLink = indexToLink;
+        this.indexToVehicleId = indexToVehicleId;
+        this.indexToPersonId = indexToPersonId;
         this.eventsManager = EventsUtils.createEventsManager();
         this.travelTimeCalculator = adhocInjector.getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
         this.eventsManager.addHandler(travelTimeCalculator);
 
         // Initialisiere den schnellen Index-Lookup einmalig
-        this.fastLinkToIndex = new HashMap<>();
-        Map<Id<Link>, Integer> matsimIndexMap = sharedTravelTime.getLinkIdToIndex();
-        for (Map.Entry<Id<Link>, Integer> entry : matsimIndexMap.entrySet()) {
-            this.fastLinkToIndex.put(entry.getKey().toString(), entry.getValue());
-        }
+        this.fastLinkToIndex = sharedTravelTime.getStringIdToIndex();
         // Wir starten mit dem initialen Stand (Free-Speed)
-        this.internalTravelTimes = sharedTravelTime.getCurrentTimesArray().clone();
+        this.internalTravelTimes = new double[fastLinkToIndex.size()];
+        // Initiales Füllen mit Free-Speed
+        log.info("Starting initial TravelTime setup...");
+        var networkLinks = scenario.getNetwork().getLinks();
+        for (Link link : networkLinks.values()) {
+            Integer idx = fastLinkToIndex.get(link.getId().toString());
+            if (idx != null) {
+                internalTravelTimes[idx] = link.getLength() / link.getFreespeed();
+            }
+        }
+        // Den initialen Stand sofort an den Router geben
+        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
+        log.info("Initial TravelTime setup complete. Updater is ready.");
     }
 
     /**
@@ -158,23 +153,27 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     public void updateRouterSingleEvent(Request request, StreamObserver<Ack> responseObserver) {
         Future<Ack> fut = updaterExecutor.submit(() -> {
 
-            Set<String> affectedLinkIds = new HashSet<>();
-            // Link-Id für das spätere Snapshot-Update merken
-            if (!request.getLinkId().isEmpty()) {
-                affectedLinkIds.add(request.getLinkId());
-            }
+// Wir nutzen jetzt Integer statt String für das Set
+            Set<Integer> affectedIndices = new HashSet<>();
+
+
+            // Verarbeite das Event (EventsManager etc.)
+            processEvent(request);
+
+            // Merke dir den Index für das Reisezeit-Update
+            // Hinweis: In Proto3 ist 0 der Default. Wenn Link 0 existiert, einfach adden.
+            affectedIndices.add(request.getLinkId());
+
 
             processEvent(request);
 
             double timeNow = request.getNow();
-            publishNewSnapshot(timeNow, affectedLinkIds);
+            publishNewSnapshot(timeNow, affectedIndices);
 
             now = (long) timeNow;
 
-            now = request.getNow();
-
             return Ack.newBuilder().
-                    setMessageReceived(true).
+                    setSuccess(true).
                     build();
         });
         try {
@@ -201,7 +200,8 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //            List<Request> requests = new ArrayList<>(batchRequest.getRequestsList());
 //            requests.sort(Comparator.comparingLong(Request::getNow));
 //            System.out.println(requests);
-            Set<String> affectedLinkIds = new HashSet<>();
+// Wir nutzen jetzt Integer statt String für das Set
+            Set<Integer> affectedIndices = new HashSet<>();
             for (Request request : batchRequest.getRequestsList()) {
 //                if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
 //                    log.info("Received event for Router update for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
@@ -221,14 +221,14 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //                    }
 //                }
                 // Link-Id für das spätere Snapshot-Update merken
-                if (!request.getLinkId().isEmpty()) {
-                    affectedLinkIds.add(request.getLinkId());
-                }
+// Merke dir den Index für das Reisezeit-Update
+                // Hinweis: In Proto3 ist 0 der Default. Wenn Link 0 existiert, einfach adden.
                 processEvent(request);
+                affectedIndices.add(request.getLinkId());
             }
 
             double timeNow = batchRequest.getRequestsList().getLast().getNow();
-            publishNewSnapshot(timeNow, affectedLinkIds);
+            publishNewSnapshot(timeNow, affectedIndices);
 
             now = (long) timeNow;
 
@@ -254,7 +254,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 
 
             return Ack.newBuilder()
-                    .setMessageReceived(true)
+                    .setSuccess(true)
                     //.setRequestId(batchRequest.getRequestsList().isEmpty() ? ByteString.EMPTY : batchRequest.getRequestId())
                     .build();
         });
@@ -284,70 +284,114 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //        }
     }
 
-    /**
-     * Erstellt einen neuen konsistenten Snapshot, aktualisiert aber nur die
-     * Links, die im aktuellen Batch verändert wurden.
-     */
-    private void publishNewSnapshot(double timeNow, Collection<String> affectedLinkIds) {
+//    private void publishNewSnapshot(double timeNow, Collection<String> affectedLinkIds) {
+//        var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
+//        var networkLinks = scenario.getNetwork().getLinks();
+//
+//        for (String linkIdStr : affectedLinkIds) {
+//            Integer idx = fastLinkToIndex.get(linkIdStr);
+//            if (idx != null) {
+//                Id<Link> linkId = indexToLinkId.get(linkIdStr);
+//                if (linkId != null) {
+//                    Link link = networkLinks.get(linkId);
+//                    if (link != null) {
+//                        internalTravelTimes[idx] = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
+//                    }
+//                }
+//            }
+//        }
+//        // Snapshot veröffentlichen
+//        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
+//    }
+
+    private void publishNewSnapshot(double timeNow, Collection<Integer> affectedIndices) {
         var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
-        var networkLinks = scenario.getNetwork().getLinks();
 
-        // 1. Nur die betroffenen Indizes im Arbeits-Array aktualisieren
-        for (String linkIdStr : affectedLinkIds) {
-            Integer idx = fastLinkToIndex.get(linkIdStr);
-            if (idx != null) {
-                // Wir müssen den Link einmal für den Calculator holen
-                // MATSim braucht hier leider das Id-Objekt oder die Link-Referenz
-                Link link = networkLinks.get(Id.createLinkId(linkIdStr));
+        for (int idx : affectedIndices) {
+            // Range-Check zur Vermeidung von Abstürzen bei fehlerhaften Client-IDs
+            if (idx >= 0 && idx < indexToLink.length) {
+                Link link = indexToLink[idx];
                 if (link != null) {
-                    // Wert aus dem MATSim-Calculator extrahieren
-                    double travelTime = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
-
-                    // Im internen Array speichern
-                    internalTravelTimes[idx] = travelTime;
+                    // Update der Master-Copy im UpdatingService Thread
+                    internalTravelTimes[idx] = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
                 }
             }
         }
-
-        // 2. Einen unmodifizierbaren Snapshot für die Routing-Threads veröffentlichen
-        // wir schicken eine Kopie, damit die Routing-Threads einen stabilen Stand haben,
-        // während wir im nächsten Batch das 'internalTravelTimes' weiter bearbeiten.
+        // Veröffentlichung an alle Router-Threads via atomarem Swap der Referenz
         sharedTravelTime.updateWithArray(internalTravelTimes.clone());
-
-        //log.info("HPC-Snapshot published for {} links at t={}", affectedLinkIds.size(), timeNow);
     }
 
     private void processEvent(Request request) {
-        if (request.getEventType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-            // Zähler pro Link erhöhen
-            int cnt = linkEnterCountsSinceLastLeave.merge(request.getVehicleId(), 1, Integer::sum);
-            if (cnt > 1) {
-                log.warn("VehicleId {} received {} consecutive LinkEnter events without LinkLeave for time {}.", request.getVehicleId(), cnt, request.getNow());
-            }
-//          System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
-            LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-//              System.out.println("LinkEnterEvent: " + linkEnterEvent);
-            eventsManager.processEvent(linkEnterEvent);
-        } else if (request.getEventType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-            linkEnterCountsSinceLastLeave.remove(request.getVehicleId());
-//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
-            LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
-//              System.out.println("LinkLeaveEvent: " + linkLeaveEvent);
-            eventsManager.processEvent(linkLeaveEvent);
-        } else if (request.getEventType().equals("vehicle enters traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
-            VehicleEntersTrafficEvent vehicleEntersTrafficEvent = new VehicleEntersTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
-                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
-//              System.out.println("VehicleEntersTrafficEvent: " + vehicleEntersTrafficEvent);
-            eventsManager.processEvent(vehicleEntersTrafficEvent);
-        } else if (request.getEventType().equals("vehicle leaves traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-//              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventLinkType: " + request.getLinkType());
-            VehicleLeavesTrafficEvent vehicleLeavesTrafficEvent = new VehicleLeavesTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
-                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
-//              System.out.println("VehicleLeavesTrafficEvent: " + vehicleLeavesTrafficEvent);
-            eventsManager.processEvent(vehicleLeavesTrafficEvent);
-        } else {
-            log.warn("Error with Event: LinkType: {}, LinkId: {}, VehicleId: {}!", request.getEventType(), request.getLinkId(), request.getVehicleId());
+        // Vorab-Checks für die wichtigsten IDs, um Redundanz im Switch zu vermeiden
+//        String linkIdStr = request.getLinkId();
+//        String vehIdStr = request.getVehicleId();
+
+        // Grundvoraussetzung für alle MATSim-Events in diesem Kontext
+//        if (linkIdStr.isEmpty() || vehIdStr.isEmpty()) {
+//            log.warn("Missing LinkId or VehicleId in event: {}", request.getEventType());
+//            return;
+//        }
+
+        int linkIdx = request.getLinkId();
+        int vehIdx = request.getVehicleId();
+
+        if (linkIdx >= indexToLink.length || vehIdx >= indexToVehicleId.length) {
+            log.error("Received out-of-bounds index: Link {} (max {}), Vehicle {} (max {})",
+                    linkIdx, indexToLink.length, vehIdx, indexToVehicleId.length);
+            return;
+        }
+
+        Id<Link> linkId = indexToLinkId[request.getLinkId()];
+        Id<Vehicle> vehicleId = indexToVehicleId[request.getVehicleId()];
+
+        double now = request.getNow();
+
+        // Der Switch auf Enums ist in Java extrem schnell (Jump Table)
+        switch (request.getEventType()) {
+            case ENTERED_LINK:
+                //log.warn("EventType: {} for Link: {}", request.getEventType(), linkIdStr);
+                // Logik für aufeinanderfolgende LinkEnters
+//                int cnt = linkEnterCountsSinceLastLeave.merge(vehId, 1, Integer::sum);
+//                if (cnt > 1) {
+//                    log.warn("VehicleId {} received {} consecutive LinkEnter events without LinkLeave at t={}.", vehIdStr, cnt, now);
+//                }
+                eventsManager.processEvent(new LinkEnterEvent(now, vehicleId, linkId));
+                break;
+
+            case LEFT_LINK:
+                //log.warn("EventType: {} for Link: {}", request.getEventType(), linkIdStr);
+//                linkEnterCountsSinceLastLeave.remove(vehIdStr);
+                eventsManager.processEvent(new LinkLeaveEvent(now, vehicleId, linkId));
+                break;
+
+            case VEHICLE_ENTERS_TRAFFIC:
+                //log.warn("EventType: {} for Link: {}", request.getEventType(), linkIdStr);
+                // Behandlung optionaler Felder aus Protobuf
+//                Id<Person> driverId = personIdCache.computeIfAbsent(request.getDriverId(), id -> Id.create(id, Person.class));
+//                String mode = request.hasNetworkMode() ? request.getNetworkMode() : "car";
+//                double relPos = request.hasRelativePositionOnLink() ? request.getRelativePositionOnLink() : 1.0;
+//
+//                eventsManager.processEvent(new VehicleEntersTrafficEvent(now, driverId, linkId, vehicleId, mode, relPos));
+                Id<Person> enteringDriverId = indexToPersonId[request.getDriverId()];
+                eventsManager.processEvent(new VehicleEntersTrafficEvent(now, enteringDriverId, linkId, vehicleId, "car", 1.0));
+                break;
+
+            case VEHICLE_LEAVES_TRAFFIC:
+                //log.warn("EventType: {} for Link: {}", request.getEventType(), linkIdStr);
+//                Id<Person> pId = personIdCache.computeIfAbsent(request.getDriverId(), id -> Id.create(id, Person.class));
+//                String m = request.hasNetworkMode() ? request.getNetworkMode() : "car";
+//                double rp = request.hasRelativePositionOnLink() ? request.getRelativePositionOnLink() : 1.0;
+//
+//                eventsManager.processEvent(new VehicleLeavesTrafficEvent(now, pId, linkId, vehicleId, m, rp));
+                Id<Person> leavingDriverId = indexToPersonId[request.getDriverId()];
+                eventsManager.processEvent(new VehicleLeavesTrafficEvent(now, leavingDriverId, linkId, vehicleId, "car", 1.0));
+                break;
+
+            case UNRECOGNIZED:
+            case UNKNOWN:
+            default:
+                log.warn("Unsupported or unknown EventType: {} for Link: {}", request.getEventType(), linkId);
+                break;
         }
     }
 

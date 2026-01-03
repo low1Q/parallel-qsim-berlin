@@ -46,7 +46,7 @@ public class ProfileRouting implements MATSimAppCommand {
         List<R> durations = new LinkedList();
 
         for (int i = 0; i < n; i++) {
-            R durationNs = call(routingService, ids.get(i).toString(), ids.get(i * 2).toString());
+            R durationNs = call(routingService, ids.get(i).index(), ids.get(i * 2).index());
             durations.add(durationNs);
         }
 
@@ -65,7 +65,7 @@ public class ProfileRouting implements MATSimAppCommand {
         return 0;
     }
 
-    private R call(RoutingServiceGrpc.RoutingServiceBlockingStub routingService, String from, String to) {
+    private R call(RoutingServiceGrpc.RoutingServiceBlockingStub routingService, int from, int to) {
         log.info("Calling routing service from {} to {}", from, to);
 
         Routing.Request request = Routing.Request.newBuilder()
@@ -73,7 +73,7 @@ public class ProfileRouting implements MATSimAppCommand {
                 .setDepartureTime(36000)
                 .setFromLinkId(from)
                 .setToLinkId(to)
-                .setPersonId("1")
+                .setPersonId(1)
                 .build();
 
         long startTime = System.nanoTime();

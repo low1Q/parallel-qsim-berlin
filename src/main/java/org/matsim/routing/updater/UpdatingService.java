@@ -20,6 +20,7 @@ import org.matsim.api.core.v01.population.Person;
 import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.core.config.Config;
 import org.matsim.core.events.EventsUtils;
+import org.matsim.core.router.util.TravelTime;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
 import event_sharing.EventSharingServiceGrpc;
 import event_sharing.EventSharing.*;
@@ -56,12 +57,18 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final ExecutorService updaterExecutor;
     // globaler Zähler: wie oft LinkEnter für denselben Link aufgetreten ist, seit letztem LinkLeave
     private final ConcurrentMap<String, Integer> linkEnterCountsSinceLastLeave = new ConcurrentHashMap<>();
-    private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
-    private final double[] internalTravelTimes;         // Das Arbeits-Array
+    private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index     // Das Arbeits-Array
     private final Link[] indexToLink;
     private final Id<Link>[] indexToLinkId;
     private final Id<Vehicle>[] indexToVehicleId;
     private final Id<Person>[] indexToPersonId;
+
+    private long lastSnapshotTime = 0;
+    private final long MIN_SNAPSHOT_INTERVAL_MS = 200; // Snapshot max. 5x pro Sekunde
+    private final Set<Integer> globalAffectedIndices = ConcurrentHashMap.newKeySet();
+    private final double[] bufferA;
+    private final double[] bufferB;
+    private boolean usingBufferA = true;
 
     public UpdatingService(Scenario sharedScenario,
                            Injector adhocInjector, Runnable shutdown,
@@ -82,35 +89,28 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         this.eventsManager = EventsUtils.createEventsManager();
         this.travelTimeCalculator = adhocInjector.getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
         this.eventsManager.addHandler(travelTimeCalculator);
-
-        // Initialisiere den schnellen Index-Lookup einmalig
         this.fastLinkToIndex = sharedTravelTime.getStringIdToIndex();
-        // Wir starten mit dem initialen Stand (Free-Speed)
-        this.internalTravelTimes = new double[fastLinkToIndex.size()];
+        int size = fastLinkToIndex.size();
+        this.bufferA = new double[size];
+        this.bufferB = new double[size];
+
         // Initiales Füllen mit Free-Speed
         log.info("Starting initial TravelTime setup...");
         var networkLinks = scenario.getNetwork().getLinks();
         for (Link link : networkLinks.values()) {
             Integer idx = fastLinkToIndex.get(link.getId().toString());
             if (idx != null) {
-                internalTravelTimes[idx] = link.getLength() / link.getFreespeed();
+                double freeSpeedTime = link.getLength() / link.getFreespeed();
+                // Beide Buffer initialisieren, damit sie identisch starten
+                this.bufferA[idx] = freeSpeedTime;
+                this.bufferB[idx] = freeSpeedTime;
             }
         }
-        // Den initialen Stand sofort an den Router geben
-        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
-        log.info("Initial TravelTime setup complete. Updater is ready.");
-    }
 
-    /**
-     * Initializes the service by loading the Travel Time Calculator, Events Manager and scenario.
-     * This method should be called before any updating requests are processed.
-     */
-//    public void init() {
-//        //this.sharedTravelTimeCalculator;
-//        //this.scenario.get();
-//        //eventsManager.get().addHandler(travelTimeCalculator.get());
-//        //eventsManager.get().addHandler(aggregator.get());
-//    }
+        // Den ersten Buffer für die Router freigeben
+        sharedTravelTime.updateWithArray(this.bufferA);
+        log.info("Initial TravelTime setup complete with Double-Buffering.");
+    }
 
     Map<String, Integer> linkCountsGlobal = new HashMap<>();
 
@@ -156,14 +156,9 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 // Wir nutzen jetzt Integer statt String für das Set
             Set<Integer> affectedIndices = new HashSet<>();
 
-
-            // Verarbeite das Event (EventsManager etc.)
-            processEvent(request);
-
             // Merke dir den Index für das Reisezeit-Update
             // Hinweis: In Proto3 ist 0 der Default. Wenn Link 0 existiert, einfach adden.
             affectedIndices.add(request.getLinkId());
-
 
             processEvent(request);
 
@@ -201,7 +196,6 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //            requests.sort(Comparator.comparingLong(Request::getNow));
 //            System.out.println(requests);
 // Wir nutzen jetzt Integer statt String für das Set
-            Set<Integer> affectedIndices = new HashSet<>();
             for (Request request : batchRequest.getRequestsList()) {
 //                if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
 //                    log.info("Received event for Router update for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
@@ -224,11 +218,20 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 // Merke dir den Index für das Reisezeit-Update
                 // Hinweis: In Proto3 ist 0 der Default. Wenn Link 0 existiert, einfach adden.
                 processEvent(request);
-                affectedIndices.add(request.getLinkId());
+                globalAffectedIndices.add(request.getLinkId());
             }
 
             double timeNow = batchRequest.getRequestsList().getLast().getNow();
-            publishNewSnapshot(timeNow, affectedIndices);
+
+            // Snapshot-Throttling: Nur updaten wenn nötig UND Zeit abgelaufen
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastSnapshotTime > MIN_SNAPSHOT_INTERVAL_MS) {
+                List<Integer> toProcess = new ArrayList<>(globalAffectedIndices);
+                globalAffectedIndices.clear();
+                publishNewSnapshot(timeNow, toProcess);
+                lastSnapshotTime = currentTime;
+            }
+            //publishNewSnapshot(timeNow, affectedIndices);
 
             now = (long) timeNow;
 
@@ -263,74 +266,41 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             Ack response = fut.get(); // blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
             responseObserver.onNext(response);
             responseObserver.onCompleted();
+            //log.info("Completed processing batch of {} events.", batchRequest.getRequestsList().size());
 
         } catch (Exception e) {
             System.out.println("Exception in updateRouterBatch: " + e.getMessage());
             responseObserver.onError(e);
         }
-
-//        long endTime = System.nanoTime();
-
-        //double durationMs = (endTime - startTime) / 1_000_000.0;
-        //if (batchRequest.getRequestsCount() >= 20000) {
-        //    log.info("Batch with size {} done in {} ms", batchRequest.getRequestsList().size(), durationMs);
-        //}
-        //log.info("Batch with size {} done in {}ns", batchRequest.getRequestsList().size(), (endTime - startTime));
-
-//        for (Request request : batchRequest.getRequestsList()) {
-//            ByteString requestId = request.getRequestId();
-//            var p = new ProfilingEntry(threadNum, request.getNow(), request.getLinkType(), request.getLinkId(), request.getVehicleId(), startTime, endTime - startTime, requestId);
-//            pe.add(p);
-//        }
     }
-
-//    private void publishNewSnapshot(double timeNow, Collection<String> affectedLinkIds) {
-//        var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
-//        var networkLinks = scenario.getNetwork().getLinks();
-//
-//        for (String linkIdStr : affectedLinkIds) {
-//            Integer idx = fastLinkToIndex.get(linkIdStr);
-//            if (idx != null) {
-//                Id<Link> linkId = indexToLinkId.get(linkIdStr);
-//                if (linkId != null) {
-//                    Link link = networkLinks.get(linkId);
-//                    if (link != null) {
-//                        internalTravelTimes[idx] = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
-//                    }
-//                }
-//            }
-//        }
-//        // Snapshot veröffentlichen
-//        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
-//    }
 
     private void publishNewSnapshot(double timeNow, Collection<Integer> affectedIndices) {
-        var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
+        // 1. Bestimme, welches Array aktuell NICHT öffentlich ist (Back-Buffer)
+        double[] backBuffer = usingBufferA ? bufferB : bufferA;
+        double[] frontBuffer = usingBufferA ? bufferA : bufferB;
 
+        // 2. Synchronisiere den Back-Buffer mit dem Front-Buffer
+        // (Nur die Werte kopieren, kein neues Objekt erzeugen!)
+        System.arraycopy(frontBuffer, 0, backBuffer, 0, frontBuffer.length);
+
+        // 3. Nur die betroffenen Links im Back-Buffer aktualisieren
+        var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
         for (int idx : affectedIndices) {
-            // Range-Check zur Vermeidung von Abstürzen bei fehlerhaften Client-IDs
-            if (idx >= 0 && idx < indexToLink.length) {
-                Link link = indexToLink[idx];
-                if (link != null) {
-                    // Update der Master-Copy im UpdatingService Thread
-                    internalTravelTimes[idx] = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
-                }
+            Link link = indexToLink[idx];
+            if (link != null) {
+                backBuffer[idx] = linkTravelTimes.getLinkTravelTime(link, timeNow, null, null);
             }
         }
-        // Veröffentlichung an alle Router-Threads via atomarem Swap der Referenz
-        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
+
+        // 4. Atomarer Swap: Den Back-Buffer zum Front-Buffer machen
+        sharedTravelTime.updateWithArray(backBuffer);
+
+        // 5. Rollen für das nächste Mal tauschen
+        usingBufferA = !usingBufferA;
     }
 
-    private void processEvent(Request request) {
-        // Vorab-Checks für die wichtigsten IDs, um Redundanz im Switch zu vermeiden
-//        String linkIdStr = request.getLinkId();
-//        String vehIdStr = request.getVehicleId();
 
-        // Grundvoraussetzung für alle MATSim-Events in diesem Kontext
-//        if (linkIdStr.isEmpty() || vehIdStr.isEmpty()) {
-//            log.warn("Missing LinkId or VehicleId in event: {}", request.getEventType());
-//            return;
-//        }
+    private void processEvent(Request request) {
 
         int linkIdx = request.getLinkId();
         int vehIdx = request.getVehicleId();

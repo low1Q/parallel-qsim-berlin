@@ -182,7 +182,8 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 
     @Override
     public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Ack> responseObserver) {
-        Future<Ack> fut = updaterExecutor.submit(() -> {
+        updaterExecutor.execute(() -> {
+            try {
 //            Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
 //        List<ProfilingEntry> pe = profilingEntries.computeIfAbsent(threadNum, s -> new ArrayList<>());
 
@@ -255,16 +256,8 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //
 //            System.out.println("Calculator t=0 / t=now/2.0 / t=now / t=27232:\t" + ttc1 + "\t" + ttc2 + "\t" + ttc3 + "\t" + ttc4);
 
-
-            return Ack.newBuilder()
-                    .setSuccess(true)
-                    //.setRequestId(batchRequest.getRequestsList().isEmpty() ? ByteString.EMPTY : batchRequest.getRequestId())
-                    .build();
-        });
-
-        try {
-            Ack response = fut.get(); // blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
-            responseObserver.onNext(response);
+// blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
+            responseObserver.onNext(Ack.newBuilder().setSuccess(true).build());
             responseObserver.onCompleted();
             //log.info("Completed processing batch of {} events.", batchRequest.getRequestsList().size());
 
@@ -272,6 +265,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             System.out.println("Exception in updateRouterBatch: " + e.getMessage());
             responseObserver.onError(e);
         }
+    });
     }
 
     private void publishNewSnapshot(double timeNow, Collection<Integer> affectedIndices) {

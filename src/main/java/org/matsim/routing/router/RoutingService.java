@@ -32,7 +32,6 @@ import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.core.utils.timing.TimeInterpretation;
 import org.matsim.facilities.*;
-import org.matsim.vehicles.Vehicle;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
@@ -44,10 +43,7 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
@@ -59,6 +55,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final TravelTimeSnapshot sharedTravelTime;
     private final Runnable shutdown;
     private final Config config;
+    private final Executor rpcExecutor;
     private final ConcurrentMap<String, Integer> threadNums = new ConcurrentHashMap<>();
     private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
     private int lastNow = -1;
@@ -76,7 +73,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     public RoutingService(Scenario sharedScenario,
                           Injector adhocInjector, Runnable shutdown,
                           Config config,
-                          TravelTimeSnapshot sharedTravelTime,
+                          ExecutorService rpcExecutor, TravelTimeSnapshot sharedTravelTime,
                           Object sharedLandmarks,
                           TravelDisutility staticDisutility,
                           ActivityFacilitiesFactory sharedFacilitiesFactory,
@@ -85,6 +82,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.adhocInjector = adhocInjector;
         this.shutdown = shutdown;
         this.config = config;
+        this.rpcExecutor = rpcExecutor;
         this.sharedTravelTime = sharedTravelTime;
         this.travelDisutility = staticDisutility;
         this.landmarks = sharedLandmarks;
@@ -128,29 +126,30 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     }
 
     /**
-     * Forces the initialization of ThreadLocal MATSim components for all pool threads.
+     * Initialisiert die ThreadLocal-Komponenten für alle Threads im gRPC-Pool.
      */
-    public void warmUpPool() {
-        int parallelism = routingPool.getParallelism();
-        log.info("Starting eager warmup of {} ForkJoinPool threads...", parallelism);
+    public void warmUpPool(int numThreads) {
+        log.info("Starting eager warmup of {} gRPC worker threads...", numThreads);
 
-        // We submit a task for every core to ensure every thread in the pool gets hit
         List<CompletableFuture<Void>> warmers = new ArrayList<>();
 
-        for (int i = 0; i < parallelism; i++) {
+        for (int i = 0; i < numThreads; i++) {
+            // Wir nutzen den rpcExecutor, den auch der gRPC-Server nutzt
             warmers.add(CompletableFuture.runAsync(() -> {
-                // Accessing the .get() methods triggers the ThreadLocal initialValue()
-                // This loads the Scenario and creates the AdhocInjector
-                //routerPool.get();
-                //accessEgressCarRouter.get();
+                // Trigger die ThreadLocal Initialisierung
                 routingModulePool.get();
-                log.info("Thread {} is now warmed up and ready.", Thread.currentThread().getName());
-            }, routingPool));
+
+                // Kleiner JIT-Turbo: Führe eine Test-Berechnung durch (optional)
+                // warmUpJIT();
+
+                log.info("Thread {} is now warmed up and MATSim components are ready.",
+                        Thread.currentThread().getName());
+            }, rpcExecutor));
         }
 
-        // Wait for all threads to finish loading heavy objects
+        // Warten, bis alle Threads ihre Initialisierung abgeschlossen haben
         CompletableFuture.allOf(warmers.toArray(new CompletableFuture[0])).join();
-        log.info("All routing threads initialized and landmarks loaded.");
+        log.info("All gRPC routing threads initialized.");
     }
 
     @Override
@@ -164,16 +163,9 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         new Thread(shutdown).start();
     }
 
-    private final ForkJoinPool routingPool = new ForkJoinPool(
-            Runtime.getRuntime().availableProcessors(),
-            ForkJoinPool.defaultForkJoinWorkerThreadFactory,
-            null, true // async mode for better throughput
-    );
-
     @Override
     public void getRoute(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
         long startTime = System.nanoTime();
-        routingPool.submit(() -> {
             try {
                 // 1. Identify Thread
                 Integer threadNum = threadNums.computeIfAbsent(
@@ -237,7 +229,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                         .withDescription("Routing failed in Java: " + e.getMessage())
                         .asException());
             }
-        });
+
     }
 
     private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, ByteString requestId) {
@@ -383,7 +375,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 return ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car")));
             });
             // ThreadLocal Router für "car"
-            return new RoutingService(null, null, null, null, null, null, null, null, null, null, null);
+            return new RoutingService(null, null, null, null, null, null, null, null, null, null, null, null);
         }
     }
 

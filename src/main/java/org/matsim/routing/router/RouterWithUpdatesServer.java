@@ -212,44 +212,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             }
         }
 
-        //       log.info("Preparing HPC Index Tables...");
-
-// 1. Links
-//        int numLinks = sharedScenario.getNetwork().getLinks().size();
-//        Link[] indexToLink = new Link[numLinks];
-//        Id<Link>[] indexToLinkId = new Id[numLinks];
-//        Map<String, Integer> linkToIndex = sharedTravelTime.getStringIdToIndex();
-//
-//        for (Link link : sharedScenario.getNetwork().getLinks().values()) {
-//            int idx = linkToIndex.get(link.getId().toString());
-//            indexToLink[idx] = link;
-//            indexToLinkId[idx] = link.getId();
-//        }
-//
-// 2. Personen
-//        int numPersons = sharedScenario.getPopulation().getPersons().size();
-//        Person[] indexToPerson = new Person[numPersons];
-// Map, um dem Client einmalig die Indices mitzuteilen (oder falls Strings reinkommen)
-//        Map<String, Integer> personToIndex = new HashMap<>();
-//        int pIdx = 0;
-//        for (Person p : sharedScenario.getPopulation().getPersons().values()) {
-//            indexToPerson[pIdx] = p;
-//            personToIndex.put(p.getId().toString(), pIdx);
-//            pIdx++;
-//        }
-//
-// 3. Fahrzeuge (analog zu Personen)
-//        int numVehicles = sharedScenario.getVehicles().getVehicles().size();
-//        Vehicle[] indexToVehicle = new Vehicle[numVehicles];
-//        Map<String, Integer> vehicleToIndex = new HashMap<>();
-//        int vIdx = 0;
-//        for (Vehicle v : sharedScenario.getVehicles().getVehicles().values()) {
-//            indexToVehicle[vIdx] = v;
-//            vehicleToIndex.put(v.getId().toString(), vIdx);
-//            vIdx++;
-//        }
-
-
         // 1. Definiere die spezialisierten Worker-Pools
         // Routing-Threads (Lese-Zugriffe)
         ExecutorService rpcExecutor = Executors.newFixedThreadPool(
@@ -304,7 +266,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         UpdatingService updatingService = new UpdatingService(sharedScenario, adhocInjector,
                 serverShutdown, config, updaterExecutor, sharedTravelTime, indexToLinkId, indexToVehicleId, indexToPersonId, indexToLink);
         //noinspection LawOfDemeter
-        RoutingService routingService = new RoutingService(sharedScenario, adhocInjector, serverShutdown, config,
+        RoutingService routingService = new RoutingService(sharedScenario, adhocInjector, serverShutdown, config, rpcExecutor,
                 sharedTravelTime, sharedLandmarks, staticDisutility, sharedFacilitiesFactory, indexToLinkId, indexToLink, indexToPerson);
         log.info("Starting sequential warm-up for {} routing threads...", numRoutingThreads);
 
@@ -313,7 +275,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
             // This calls the method we wrote that uses CompletableFuture
             // to flood the ForkJoinPool and wait for all cores to finish.
-            routingService.warmUpPool();
+            routingService.warmUpPool(numRoutingThreads);
 
             log.info("Eager Warmup complete. All cores are JIT-optimized and routers are ready.");
         } catch (Exception e) {

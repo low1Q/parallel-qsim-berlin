@@ -26,7 +26,7 @@ import org.matsim.core.population.routes.NetworkRoute;
 import org.matsim.core.router.MultimodalLinkChooser;
 import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.RoutingRequest;
-import org.matsim.core.router.speedy.SpeedyHPCBridge;
+import org.matsim.core.router.speedy.SpeedyALTDataBridge;
 import org.matsim.core.router.util.LeastCostPathCalculator;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.scenario.ScenarioUtils;
@@ -83,7 +83,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.carRouter = ThreadLocal.withInitial(() -> {
             // 1. Create the FAST Router using shared memory landmarks
             // This is the core 'car' logic you pre-calculated
-            LeastCostPathCalculator carAlgo = SpeedyHPCBridge.createRouter(
+            LeastCostPathCalculator carAlgo = SpeedyALTDataBridge.createRouter(
                     landmarks,
                     travelTime,
                     travelDisutility
@@ -349,7 +349,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 //            SpeedyGraph speedyGraph = SpeedyGraphBuilder.build(network, null);
 //
 //            // Landmarken auf Basis von Free-Speed berechnen (einmalig)
-//            Object sharedLandmarks = SpeedyHPCBridge.createLandmarks(
+//            Object sharedLandmarks = SpeedyALTDataBridge.createLandmarks(
 //                    speedyGraph, 16,
 //                    new OnlyTimeDependentTravelDisutilityFactory().createTravelDisutility(sharedTravelTime.getStaticFreeSpeedView())
 //            );

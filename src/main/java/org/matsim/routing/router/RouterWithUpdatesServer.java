@@ -19,9 +19,9 @@ import org.matsim.core.config.ConfigUtils;
 import org.matsim.core.config.groups.RoutingConfigGroup;
 import org.matsim.core.controler.*;
 import org.matsim.core.router.costcalculators.OnlyTimeDependentTravelDisutilityFactory;
+import org.matsim.core.router.speedy.SpeedyALTDataBridge;
 import org.matsim.core.router.speedy.SpeedyGraph;
 import org.matsim.core.router.speedy.SpeedyGraphBuilder;
-import org.matsim.core.router.speedy.SpeedyHPCBridge;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.router.util.TravelTime;
 import org.matsim.core.scenario.ScenarioUtils;
@@ -121,7 +121,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         TravelDisutility staticDisutility = new OnlyTimeDependentTravelDisutilityFactory()
                 .createTravelDisutility(staticFreeSpeed);
 //        // Wir speichern es als Object, da wir den Typ SpeedyALTData hier nicht schreiben dürfen
-        Object sharedLandmarks = SpeedyHPCBridge.createSharedData(graph, 16, staticDisutility);
+        Object sharedLandmarks = SpeedyALTDataBridge.createSharedData(graph, 16, staticDisutility);
         log.info("Preprocessing finished. Starting gRPC server...");
 
         prepareVehicles(sharedScenario);

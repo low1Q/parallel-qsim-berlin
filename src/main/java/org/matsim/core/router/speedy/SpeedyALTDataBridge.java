@@ -1,10 +1,10 @@
-package org.matsim.core.router.speedy; // DAS IST DER ENTSCHEIDENDE TEIL
+package org.matsim.core.router.speedy;
 
 import org.matsim.core.router.util.LeastCostPathCalculator;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.router.util.TravelTime;
 
-public class SpeedyHPCBridge {
+public class SpeedyALTDataBridge {
 
     /**
      * Da diese Methode im selben Package wie SpeedyALTData deklariert ist,

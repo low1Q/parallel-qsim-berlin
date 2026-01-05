@@ -11,7 +11,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
-public class HighPerformanceTravelTime implements TravelTime {
+public class TravelTimeSnapshot implements TravelTime {
 
     // Eine kleine Hilfsklasse für den Snapshot
     private static class Snapshot {
@@ -30,7 +30,7 @@ public class HighPerformanceTravelTime implements TravelTime {
     private final Map<Id<Link>, Integer> linkIdToIndex;
     private int versionCounter = 0;
 
-    public HighPerformanceTravelTime(Network network) {
+    public TravelTimeSnapshot(Network network) {
         this.linkIdToIndex = new HashMap<>();
         double[] initialTimes = new double[network.getLinks().size()];
 
@@ -77,11 +77,7 @@ public class HighPerformanceTravelTime implements TravelTime {
     @Override
     public double getLinkTravelTime(Link link, double time, Person person, Vehicle vehicle) {
         // Extrem schnell: Nur eine Referenz holen
-        double val = currentSnapshot.get().times[linkIdToIndex.get(link.getId())];
-        if (val > 1000) {
-            System.out.println("DEBUG: Router fragt Link " + link.getId() + " ab. Wert: " + val);
-        }
-        return val;
+        return currentSnapshot.get().times[linkIdToIndex.get(link.getId())];
     }
 
     public void updateTravelTimes(Map<Id<Link>, Double> updates) {

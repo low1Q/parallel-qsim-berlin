@@ -22,7 +22,7 @@ import org.matsim.core.events.EventsUtils;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
 import event_sharing.EventSharingServiceGrpc;
 import event_sharing.EventSharing.*;
-import org.matsim.routing.router.HighPerformanceTravelTime;
+import org.matsim.routing.router.TravelTimeSnapshot;
 import org.matsim.vehicles.Vehicle;
 
 //import java.io.BufferedWriter;
@@ -41,15 +41,13 @@ import java.util.concurrent.Future;
 public class UpdatingService extends EventSharingServiceGrpc.EventSharingServiceImplBase {
     private static final Logger log = LogManager.getLogger(UpdatingService.class);
     private final Scenario scenario;
-    private final Injector adhocInjector;
     private final TravelTimeCalculator travelTimeCalculator;
     private final EventsManager eventsManager;
-    private final HighPerformanceTravelTime sharedTravelTime;
-    //private final ThreadLocal<SimpleTravelTimeAggregator> aggregator;
+    private final TravelTimeSnapshot sharedTravelTime;
     private final Runnable shutdown;
     private final Config config;
     private final ConcurrentMap<String, Integer> threadNums = new ConcurrentHashMap<>();
-//    private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
+    //    private final ConcurrentMap<Integer, List<ProfilingEntry>> profilingEntries = new ConcurrentHashMap<>(600_000);
 //    private int lastNow = -1;
     private long now = 0;
     private final ExecutorService updaterExecutor;
@@ -61,39 +59,22 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final Map<String, Id<Vehicle>> vehicleIdCache;
 
     public UpdatingService(Scenario sharedScenario,
-                           Injector adhocInjector, Runnable shutdown,
-                           Config config,
+                           Injector sharedAdhocInjector,
+                           Runnable shutdown,
+                           Config sharedConfig,
                            ExecutorService updaterExecutor,
-                           HighPerformanceTravelTime sharedTravelTime,
+                           TravelTimeSnapshot sharedTravelTime,
                            Map<String, Id<Link>> linkIdCache, Map<String, Id<Vehicle>> vehicleIdCache) {
         this.scenario = sharedScenario;
-        this.adhocInjector = adhocInjector;
         this.shutdown = shutdown;
-        this.config = config;
+        this.config = sharedConfig;
         this.updaterExecutor = updaterExecutor;
         this.sharedTravelTime = sharedTravelTime;
         this.linkIdCache = linkIdCache;
         this.vehicleIdCache = vehicleIdCache;
 
-//        // 1. TTC und EventsManager hier drin erstellen
-//// 1. Hole die Werte für unsere eigene Logik
-//        TravelTimeCalculatorConfigGroup ttcConfig = config.travelTimeCalculator();
-//        double binSize = ttcConfig.getTraveltimeBinSize();
-//        int maxTime = ttcConfig.getMaxTime();
-//// 1. Builder instanziieren
-//        TravelTimeCalculator.Builder builder = new TravelTimeCalculator.Builder(scenario.getNetwork());
-//// 2. Werte setzen (Vorsicht bei void-Methoden)
-//        builder.setTimeslice(binSize);
-//        builder.setMaxTime(maxTime); // Diese Methode ist void!
-//        builder.setCalculateLinkTravelTimes(ttcConfig.isCalculateLinkTravelTimes());
-//        builder.setCalculateLinkToLinkTravelTimes(ttcConfig.isCalculateLinkToLinkTravelTimes());
-//
-//// 3. Falls du die "configure" Logik aus der ConfigGroup übernehmen willst (wichtig für den Getter-Typ!):
-//        builder.configure(ttcConfig);
-//// 4. Endlich bauen
-//        this.travelTimeCalculator = builder.build();
         this.eventsManager = EventsUtils.createEventsManager();
-        this.travelTimeCalculator = adhocInjector.getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
+        this.travelTimeCalculator = sharedAdhocInjector.getInstance(Key.get(TravelTimeCalculator.class, Names.named("car")));
         this.eventsManager.addHandler(travelTimeCalculator);
 
         // Initialisiere den schnellen Index-Lookup einmalig
@@ -117,7 +98,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //        //eventsManager.get().addHandler(aggregator.get());
 //    }
 
-    Map<String, Integer> linkCountsGlobal = new HashMap<>();
+//    Map<String, Integer> linkCountsGlobal = new HashMap<>();
 
     @Override
     public void shutdown(Empty request, StreamObserver<Empty> responseObserver) {
@@ -169,8 +150,6 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             double timeNow = request.getNow();
             publishNewSnapshot(timeNow, affectedLinkIds);
 
-            now = (long) timeNow;
-
             now = request.getNow();
 
             return Ack.newBuilder().
@@ -187,8 +166,9 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     }
 
     @Override
-    public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Ack> responseObserver) {
-        Future<Ack> fut = updaterExecutor.submit(() -> {
+    public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Empty> responseObserver) {
+        updaterExecutor.execute(() -> {
+            try {
 //            Integer threadNum = threadNums.computeIfAbsent(Thread.currentThread().getName(), s -> Integer.valueOf(s.substring(s.lastIndexOf('-') + 1)));
 //        List<ProfilingEntry> pe = profilingEntries.computeIfAbsent(threadNum, s -> new ArrayList<>());
 
@@ -197,18 +177,18 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //            String linkIdMax = null;
 
 //        long startTime = System.nanoTime();
-            // Kopiere und sortiere die Requests nach Zeit (aufsteigend), stabile Sortierung bewahrt Reihenfolge bei gleicher Zeit
+                // Kopiere und sortiere die Requests nach Zeit (aufsteigend), stabile Sortierung bewahrt Reihenfolge bei gleicher Zeit
 //            List<Request> requests = new ArrayList<>(batchRequest.getRequestsList());
 //            requests.sort(Comparator.comparingLong(Request::getNow));
 //            System.out.println(requests);
-            Set<String> affectedLinkIds = new HashSet<>();
-            for (Request request : batchRequest.getRequestsList()) {
+                Set<String> affectedLinkIds = new HashSet<>();
+                for (Request request : batchRequest.getRequestsList()) {
 //                if (threadNum == 0 && lastNow < request.getNow() && lastNow / 3600 != request.getNow() / 3600) {
 //                    log.info("Received event for Router update for simulation hour {}:00", String.format("%02d", request.getNow() / 3600));
 //                    lastNow = request.getNow();
 //                }
 
-                // Zähle Link-IDs im aktuellen Batch und bestimme Maximalwert + zugehörige LinkId
+                    // Zähle Link-IDs im aktuellen Batch und bestimme Maximalwert + zugehörige LinkId
 
 //                String linkId = request.getLinkId();
 //                linkCounts.merge(linkId, 1, Integer::sum);
@@ -220,19 +200,19 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //                        linkIdMax = e.getKey();
 //                    }
 //                }
-                // Link-Id für das spätere Snapshot-Update merken
-                if (!request.getLinkId().isEmpty()) {
-                    affectedLinkIds.add(request.getLinkId());
+                    // Link-Id für das spätere Snapshot-Update merken
+                    if (!request.getLinkId().isEmpty()) {
+                        affectedLinkIds.add(request.getLinkId());
+                    }
+                    processEvent(request);
                 }
-                processEvent(request);
-            }
 
-            double timeNow = batchRequest.getRequestsList().getLast().getNow();
-            publishNewSnapshot(timeNow, affectedLinkIds);
+                double timeNow = batchRequest.getRequestsList().getLast().getNow();
+                publishNewSnapshot(timeNow, affectedLinkIds);
 
-            now = (long) timeNow;
+                now = (long) timeNow;
 
-            // linkCountMax enthält jetzt die höchste Häufigkeit, linkIdMax die entsprechende LinkId
+                // linkCountMax enthält jetzt die höchste Häufigkeit, linkIdMax die entsprechende LinkId
 //            log.info("Most frequent link {} occurred {} times.", linkIdMax, linkCountMax);
 //
 //            assert linkIdMax != null;
@@ -253,22 +233,21 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
 //            System.out.println("Calculator t=0 / t=now/2.0 / t=now / t=27232:\t" + ttc1 + "\t" + ttc2 + "\t" + ttc3 + "\t" + ttc4);
 
 
-            return Ack.newBuilder()
-                    .setMessageReceived(true)
-                    //.setRequestId(batchRequest.getRequestsList().isEmpty() ? ByteString.EMPTY : batchRequest.getRequestId())
-                    .build();
+//                Ack response = Ack.newBuilder()
+//                        .setMessageReceived(true)
+//                        //.setRequestId(batchRequest.getRequestsList().isEmpty() ? ByteString.EMPTY : batchRequest.getRequestId())
+//                        .build();
+
+                responseObserver.onNext(Empty.getDefaultInstance());
+                responseObserver.onCompleted();
+
+            } catch (Exception e) {
+                log.error("Fehler im Batch-Update", e);
+                responseObserver.onError(io.grpc.Status.INTERNAL
+                        .withDescription("Processing failed: " + e.getMessage())
+                        .asException());
+            }
         });
-
-        try {
-            Ack response = fut.get(); // blockiert bis Task fertig -> Anfragen warten in SingleThread-Queue
-            responseObserver.onNext(response);
-            responseObserver.onCompleted();
-
-        } catch (Exception e) {
-            System.out.println("Exception in updateRouterBatch: " + e.getMessage());
-            responseObserver.onError(e);
-        }
-
 //        long endTime = System.nanoTime();
 
         //double durationMs = (endTime - startTime) / 1_000_000.0;
@@ -314,22 +293,22 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         // während wir im nächsten Batch das 'internalTravelTimes' weiter bearbeiten.
         sharedTravelTime.updateWithArray(internalTravelTimes.clone());
 
-        //log.info("HPC-Snapshot published for {} links at t={}", affectedLinkIds.size(), timeNow);
+        //log.info("Snapshot published for {} links at t={}", affectedLinkIds.size(), timeNow);
     }
 
     private void processEvent(Request request) {
         if (request.getEventType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
             // Zähler pro Link erhöhen
-            int cnt = linkEnterCountsSinceLastLeave.merge(request.getVehicleId(), 1, Integer::sum);
-            if (cnt > 1) {
-                log.warn("VehicleId {} received {} consecutive LinkEnter events without LinkLeave for time {}.", request.getVehicleId(), cnt, request.getNow());
-            }
+//            int cnt = linkEnterCountsSinceLastLeave.merge(request.getVehicleId(), 1, Integer::sum);
+//            if (cnt > 1) {
+//                log.warn("VehicleId {} received {} consecutive LinkEnter events without LinkLeave for time {}.", request.getVehicleId(), cnt, request.getNow());
+//            }
 //          System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
             LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
 //              System.out.println("LinkEnterEvent: " + linkEnterEvent);
             eventsManager.processEvent(linkEnterEvent);
         } else if (request.getEventType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-            linkEnterCountsSinceLastLeave.remove(request.getVehicleId());
+            //linkEnterCountsSinceLastLeave.remove(request.getVehicleId());
 //              System.out.println("EventLinkId: " + request.getLinkId() + "    EventVehicleId: " + request.getVehicleId() + "    EventType: " + request.getEventType() + "\t EventNow: " + request.getNow());
             LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
 //              System.out.println("LinkLeaveEvent: " + linkLeaveEvent);

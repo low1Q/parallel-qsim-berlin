@@ -41,7 +41,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
-//945€
 public class RouterWithUpdatesServer implements MATSimAppCommand {
     private static final int PORT = 50051;
     private static final Logger log = LogManager.getLogger(RouterWithUpdatesServer.class);
@@ -78,32 +77,35 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.controller().setOutputDirectory(output);
         config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
         config.global().setNumberOfThreads(1);
-        config.controller().setLastIteration(0);
         config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         config.counts().setInputFile(null);
         config.qsim().setUsePersonIdForMissingVehicleId(true);
         config.qsim().setEndTime(86400);
+        // RoutingService ThreadLocal Warmup beschleunigen
         config.routing().setNetworkRouteConsistencyCheck(RoutingConfigGroup.NetworkRouteConsistencyCheck.disable);
         config.travelTimeCalculator().setTraveltimeBinSize(900);
 
+        // Hoffentlich RAM sparen
+        config.removeModule("transitRouter");
+        config.removeModule("households");
         config.global().setInsistingOnDeprecatedConfigVersion(false);
-        System.setProperty("matsim.preferLocalDtds", "true");
 
         if (localFiles) {
             adaptToLocalFileNames(config);
         }
 
-        // Lade ein einzelnes Scenario, EventsManager und TravelTimeCalculator und teile sie
+        // Gemeinsames Scenario und Injector für alle Services und Threads
         Scenario sharedScenario = ScenarioUtils.loadScenario(config);
-        Injector adhocInjector = ControllerUtils.createAdhocInjector(sharedScenario);
+        Injector sharedAdhocInjector = ControllerUtils.createAdhocInjector(sharedScenario);
 
-        // 2. Deine High-Performance TravelTime
+        // Gemeinsame TravelTime-Snapshot-Instanz für Routing und Updates
         TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork());
+        // TravelDisutility, die den Snapshot nutzt
         TravelDisutility dynamicDisutility = new org.matsim.core.router.util.TravelDisutility() {
             @Override
             public double getLinkTravelDisutility(Link link, double time, Person person, Vehicle vehicle) {
-                // Hier rufen wir direkt deinen Snapshot auf!
+                // Hier rufen wir direkt den Snapshot auf
                 return sharedTravelTime.getLinkTravelTime(link, time, person, vehicle);
             }
 
@@ -114,48 +116,48 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             }
         };
 
-        // 1. Initialisierung beim Server-Start
+        // Initialisierung des SpeedyALTRouters beim Server-Start
         log.info("Pre-calculating SpeedyALT landmarks...");
         SpeedyGraph graph = SpeedyGraphBuilder.build(sharedScenario.getNetwork(), null);
+        // Statische Free-Speed TravelTime und TravelDisutility als unterste Schranke für Landmark-Berechnung
         TravelTime staticFreeSpeed = sharedTravelTime.getStaticFreeSpeedView();
         TravelDisutility staticDisutility = new OnlyTimeDependentTravelDisutilityFactory()
                 .createTravelDisutility(staticFreeSpeed);
-//        // Wir speichern es als Object, da wir den Typ SpeedyALTData hier nicht schreiben dürfen
+        // Wir speichern es als Object, da wir den Typ SpeedyALTData hier nicht schreiben dürfen
         Object sharedLandmarks = SpeedyALTDataBridge.createSharedData(graph, 16, staticDisutility);
         log.info("Preprocessing finished. Starting gRPC server...");
 
+        // Fahrzeuge für alle Personen vorbereiten
         prepareVehicles(sharedScenario);
 
-// Store the actual Link objects.
-// This is faster because Network.getLinks().get() requires an Id object,
-// but this map allows you to use the raw String from your gRPC request.
-        log.info("Creating fast lookup maps...");
-        Map<String, Id<Link>> linkIdCache = new HashMap<>();
-
-        for (Id<Link> id : sharedScenario.getNetwork().getLinks().keySet()) {
-            linkIdCache.put(id.toString(), id);
-        }
-        Map<String, Person> personCache = new HashMap<>();
-        for (Person p : sharedScenario.getPopulation().getPersons().values()) {
-            personCache.put(p.getId().toString(), p);
-        }
-        Map<String, Id<Vehicle>> vehicleIdCache = new HashMap<>();
-
-        // Cache all Vehicle IDs if you have a fixed fleet
-        for (Id<Vehicle> id : sharedScenario.getVehicles().getVehicles().keySet()) {
-            vehicleIdCache.put(id.toString(), id);
-        }
+        // Schnellzugriffs-Maps für IDs erstellen | WIP
+//        log.info("Creating fast lookup maps...");
+//        Map<String, Id<Link>> linkIdCache = new HashMap<>();
+//
+//        for (Id<Link> id : sharedScenario.getNetwork().getLinks().keySet()) {
+//            linkIdCache.put(id.toString(), id);
+//        }
+//        Map<String, Person> personCache = new HashMap<>();
+//        for (Person p : sharedScenario.getPopulation().getPersons().values()) {
+//            personCache.put(p.getId().toString(), p);
+//        }
+//        Map<String, Id<Vehicle>> vehicleIdCache = new HashMap<>();
+//
+//        // Cache all Vehicle IDs if you have a fixed fleet
+//        for (Id<Vehicle> id : sharedScenario.getVehicles().getVehicles().keySet()) {
+//            vehicleIdCache.put(id.toString(), id);
+//        }
 
         RejectedExecutionHandler loggingHandler = (runnable, executor) -> {
             log.warn("BACKPRESSURE: Routing-Queue ist voll! Request wird im gRPC-Netzwerk-Thread ausgeführt. Performance sinkt!");
             new ThreadPoolExecutor.CallerRunsPolicy().rejectedExecution(runnable, executor);
         };
 
-        // 1. Definiere die spezialisierten Worker-Pools
+        // Definiere die spezialisierten Worker-Pools
         // Routing-Threads (Lese-Zugriffe)
         int numThreads = (numRoutingThreads > 0) ? numRoutingThreads : Runtime.getRuntime().availableProcessors();
         ExecutorService rpcExecutor = new ThreadPoolExecutor(
-                numThreads, numThreads, // Fixe Anzahl Threads passend zur CPU
+                numThreads, numThreads, // Fixe Anzahl Threads passend zur CPU, wenn numRoutingThreads <= 0
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(1000), // Begrenzte Queue gegen Memory-Overflow
                 new ThreadFactoryBuilder().setNameFormat("router-thread-%d").build(),
@@ -163,8 +165,11 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         );
 
         // Update-Thread (Schreib-Zugriffe: IMMER Single-Threaded!)
-        ExecutorService updaterExecutor = Executors.newSingleThreadExecutor(
-                new ThreadFactoryBuilder().setNameFormat("updater-%d").setDaemon(true).build()
+        ExecutorService updaterExecutor = new ThreadPoolExecutor(
+                1, 1, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(500),
+                new ThreadFactoryBuilder().setNameFormat("updater-%d").setDaemon(true).build(),
+                new ThreadPoolExecutor.AbortPolicy() // Wirft eine Exception bei Überlastung
         );
 
         // Erzeuge Services mit den neuen public-Konstruktoren
@@ -175,7 +180,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
         AtomicReference<Server> serverRef = new AtomicReference<>();
 
-        // 1. Definiere die Logik für das saubere Aufräumen
+        // Definiere die Logik für das saubere Aufräumen
         Runnable serverShutdown = () -> {
             log.info("HPC Cleanup: Shutting down server and pools...");
 
@@ -190,29 +195,24 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
                 }
             }
 
-            // Pools stoppen (Wichtig für HPC!)
+            // Pools stoppen (Graceful Shutdown)
             updaterExecutor.shutdownNow();
             rpcExecutor.shutdownNow();
 
             log.info("HPC Cleanup: All resources released.");
         };
 
-// 2. Registriere es beim Betriebssystem
+        // Registriere es beim Betriebssystem
         Runtime.getRuntime().addShutdownHook(new Thread(serverShutdown));
-
-// 3. Optional: Falls du einen gRPC-Befehl zum Beenden hast,
-// kann dieser einfach cleanup.run() aufrufen.
 
         // setze reale shutdown hooks in Services (optional)
         // (Hier einfache Zuordnung)
-        //noinspection LawOfDemeter
-        UpdatingService updatingService = new UpdatingService(sharedScenario, adhocInjector,
-                serverShutdown, config, updaterExecutor, sharedTravelTime, linkIdCache, vehicleIdCache);
-        //noinspection LawOfDemeter
-        RoutingService routingService = new RoutingService(sharedScenario, adhocInjector,
-                serverShutdown, config, sharedTravelTime, sharedLandmarks, dynamicDisutility, linkIdCache, personCache);
+        UpdatingService updatingService = new UpdatingService(sharedScenario, sharedAdhocInjector,
+                serverShutdown, updaterExecutor, sharedTravelTime);
+        RoutingService routingService = new RoutingService(sharedScenario, sharedAdhocInjector,
+                serverShutdown, config, sharedTravelTime, sharedLandmarks, dynamicDisutility);
 
-// HPC Eager Warmup (Direkt auf dem rpcExecutor)
+        // Eager Warmup (Direkt auf dem rpcExecutor)
         log.info("Starting High-Performance Eager Warmup on {} threads...", numThreads);
         CountDownLatch warmUpLatch = new CountDownLatch(numThreads);
 

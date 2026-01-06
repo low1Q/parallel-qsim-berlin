@@ -21,7 +21,7 @@ import java.util.List;
 public class ProfileRouting implements MATSimAppCommand {
     private static final Logger log = LogManager.getLogger(ProfileRouting.class);
 
-    @CommandLine.Option(names = "--network", description = "Path to config", defaultValue = "output/v6.4/10pct/berlin-v6.4.network.xml.gz")
+    @CommandLine.Option(names = "--network", description = "Path to config", defaultValue = "output/v6.4/1pct/berlin-v6.4-network.xml.gz")
     private String network;
 
     @CommandLine.Option(names = "--n", description = "Number of calls to make", defaultValue = "1000")
@@ -69,11 +69,11 @@ public class ProfileRouting implements MATSimAppCommand {
         log.info("Calling routing service from {} to {}", from, to);
 
         Routing.Request request = Routing.Request.newBuilder()
-                .setMode("pt")
+                .setMode("car")
                 .setDepartureTime(36000)
                 .setFromLinkId(from)
                 .setToLinkId(to)
-                .setPersonId("1")
+                .setPersonId("bb_00005f6f")
                 .build();
 
         long startTime = System.nanoTime();

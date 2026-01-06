@@ -11,14 +11,14 @@ import picocli.CommandLine;
 
 import java.util.List;
 
-public class PtRequestsAnalysis implements MATSimAppCommand {
-    Logger log = LoggerFactory.getLogger(PtRequestsAnalysis.class);
+public class CarRequestsAnalysis implements MATSimAppCommand {
+    Logger log = LoggerFactory.getLogger(CarRequestsAnalysis.class);
 
-    @CommandLine.Option(names = "--population", description = "Path to config", defaultValue = "output/v6.4/10pct/berlin-v6.4.output_experienced_plans.xml.gz")
+    @CommandLine.Option(names = "--population", description = "Path to config", defaultValue = "output/v6.4/1pct/berlin-v6.4.output_experienced_plans.xml.gz")
     String populationPath;
 
     public static void main(String[] args) {
-        new PtRequestsAnalysis().execute(args);
+        new CarRequestsAnalysis().execute(args);
     }
 
     @Override
@@ -28,7 +28,7 @@ public class PtRequestsAnalysis implements MATSimAppCommand {
         List<Double> endTimes = population.getPersons().values().stream()
                 .map(HasPlansAndId::getSelectedPlan)
                 .flatMap(p -> TripStructureUtils.getTrips(p).stream())
-                .filter(t -> TripStructureUtils.identifyMainMode(t.getLegsOnly()).equals("pt"))
+                .filter(t -> TripStructureUtils.identifyMainMode(t.getLegsOnly()).equals("car"))
                 .map(t -> t.getOriginActivity().getEndTime().orElseThrow(RuntimeException::new))
                 .toList();
 

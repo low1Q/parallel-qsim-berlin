@@ -8,7 +8,7 @@ source("src/main/R/utils.R")
 
 
 # read csv with header thread,now,departure_time,from,to,start,duration_ns,travel_time_s,request_id at /path
-path <- "/Users/paulh/hlrn-cluster/rust-pt-routing/parallel-qsim-berlin/output/v6.4/1pct/routing/routing-profiling-2025-11-18_10-50-16.csv"
+path <- "/home/lowiq/MATSimBA/parallel-qsim-berlin/output/routing/routing-profiling-2026-01-05_22-00-13.csv"
 dt <- fread(path)
 
 dt[, thread := factor(thread)]
@@ -49,11 +49,11 @@ ggplot(events, aes(x = time_ns, y = active)) +
 per_thread <- dt %>%
   group_by(thread) %>%
   summarise(
-    total_run_ns = sum(duration_ns),      # total busy time
+    total_run_ns = as.numeric(sum(duration_ns)),      # total busy time
     first_start_ns = min(start),
     last_end_ns = max(end),
-    thread_window_ns = last_end_ns - first_start_ns,
-    idle_within_thread_window_ns = thread_window_ns - total_run_ns,
+    thread_window_ns = as.numeric(last_end_ns - first_start_ns),
+    idle_within_thread_window_ns = as.numeric(thread_window_ns - total_run_ns),
     .groups = "drop"
   )
 

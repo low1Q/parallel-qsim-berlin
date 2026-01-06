@@ -62,12 +62,7 @@ public class TravelTimeSnapshot implements TravelTime {
      * Wird genutzt, um SpeedyALT-Landmarken einmalig stabil zu berechnen.
      */
     public TravelTime getStaticFreeSpeedView() {
-        return new TravelTime() {
-            @Override
-            public double getLinkTravelTime(Link link, double time, Person person, Vehicle vehicle) {
-                return link.getLength() / link.getFreespeed();
-            }
-        };
+        return (link, time, person, vehicle) -> link.getLength() / link.getFreespeed();
     }
 
     @Override

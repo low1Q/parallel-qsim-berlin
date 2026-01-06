@@ -17,18 +17,15 @@ public class TravelTimeSnapshot implements TravelTime {
     private static class Snapshot {
         final double[] times;
         final long timestamp;
-        final int version;
 
-        Snapshot(double[] times, int version) {
+        Snapshot(double[] times) {
             this.times = times;
-            this.version = version;
             this.timestamp = System.currentTimeMillis();
         }
     }
 
     private final AtomicReference<Snapshot> currentSnapshot;
     private final Map<Id<Link>, Integer> linkIdToIndex;
-    private int versionCounter = 0;
 
     public TravelTimeSnapshot(Network network) {
         this.linkIdToIndex = new HashMap<>();
@@ -41,7 +38,7 @@ public class TravelTimeSnapshot implements TravelTime {
             initialTimes[i] = link.getLength() / link.getFreespeed();
             i++;
         }
-        this.currentSnapshot = new AtomicReference<>(new Snapshot(initialTimes, versionCounter++));
+        this.currentSnapshot = new AtomicReference<>(new Snapshot(initialTimes));
     }
 
     // Gibt das aktuellste Array aus dem Snapshot zurück
@@ -56,9 +53,8 @@ public class TravelTimeSnapshot implements TravelTime {
 
     // Hilfsmethode für den UpdatingService: Akzeptiert ein fertig vorbereitetes Array
     public void updateWithArray(double[] newTimes) {
-        Snapshot old = currentSnapshot.get();
-        // Wir erhöhen die Version und setzen das neue Array atomar
-        currentSnapshot.set(new Snapshot(newTimes, old.version + 1));
+        // Wir setzen das neue Array atomar
+        currentSnapshot.set(new Snapshot(newTimes));
     }
 
     /**
@@ -76,23 +72,7 @@ public class TravelTimeSnapshot implements TravelTime {
 
     @Override
     public double getLinkTravelTime(Link link, double time, Person person, Vehicle vehicle) {
-        // Extrem schnell: Nur eine Referenz holen
+        // Nur eine Referenz holen
         return currentSnapshot.get().times[linkIdToIndex.get(link.getId())];
-    }
-
-    public void updateTravelTimes(Map<Id<Link>, Double> updates) {
-        Snapshot old = currentSnapshot.get();
-        double[] newTimes = old.times.clone();
-
-        updates.forEach((id, val) -> {
-            Integer idx = linkIdToIndex.get(id);
-            if (idx != null) newTimes[idx] = val;
-        });
-
-        Snapshot next = new Snapshot(newTimes, versionCounter++);
-        currentSnapshot.set(next);
-
-        System.out.println("Snapshot aktualisiert auf Version " + next.version +
-                " um " + new java.util.Date(next.timestamp));
     }
 }

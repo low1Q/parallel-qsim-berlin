@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Router" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="org.matsim.routing.router.RouterWithUpdatesServer" />
+    <module name="parallel-qsim-berlin" />
+    <option name="PROGRAM_PARAMETERS" value="--threads 4 --config output/v6.4/1pct/berlin-v6.4.config.xml --sample 1 --output output/routing --localFiles&quot;" />
+    <option name="VM_PARAMETERS" value="-Xmx20G -XX:+UseZGC -Dguice.disable.misplaced.annotation.check=true --add-opens java.base/java.lang=ALL-UNNAMED -Dguice_include_stack_traces=OFF -Dclassgraph.skipRuntimeInvisibleAnnotations=true --enable-native-access=ALL-UNNAMED -Dmatsim.preferLocalDtds=true" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

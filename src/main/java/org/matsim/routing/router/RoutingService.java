@@ -29,6 +29,7 @@ import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.utils.timing.TimeInterpretation;
 import org.matsim.facilities.*;
 import org.matsim.utils.objectattributes.attributable.Attributes;
+import org.matsim.utils.objectattributes.attributable.AttributesImpl;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
@@ -143,24 +144,38 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
     @Override
     public void getRoute(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
-        try {
-            long startTime = System.nanoTime();
+        long startTime = System.nanoTime();
 
+        // Wichtig: Snapshot an den aktuellen Worker-Thread binden.
+        // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
+        travelTime.bindToTime(request.getNow());
+        log.debug(
+                "Routing request {} bound to snapshot {}, current snapshot is {}, with timestamp {}",
+                request.getRequestId(),
+                travelTime.getBoundSnapshotId(),
+                travelTime.getCurrentSnapshotId(),
+                travelTime.getBoundSnapshotTimestamp()
+        );
+        assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
+
+        try {
             long currentHour = request.getNow() / 3600;
             if (lastLoggedHour.get() != currentHour) {
                 if (lastLoggedHour.getAndSet(currentHour) != currentHour) {
                     log.info("Received route request for simulation hour {}:00", String.format("%02d", currentHour));
                 }
             }
+
             RoutingRequest carRouteRequest = createCarRouteRequest(request);
+
             List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
             Routing.Response response = convertToProtoResponse(planElements, request.getRequestId());
+
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
             long endTime = System.nanoTime();
             int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
-
             profilingQueue.add(new ProfilingEntry(
                     (int) Thread.currentThread().threadId(),
                     request.getNow(),
@@ -174,11 +189,13 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             ));
 
         } catch (Exception e) {
-            log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage());
+            log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage(), e);
             // This is vital: Rust is waiting for this message!
             responseObserver.onError(io.grpc.Status.INTERNAL
                     .withDescription("Routing failed in Java: " + e.getMessage())
                     .asException());
+        } finally {
+            travelTime.unbind();
         }
     }
 
@@ -280,7 +297,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 throw new IllegalArgumentException("Person with ID " + personId + " not found in scenario.");
             }
         } else {
-            System.out.println("PersonId was empty.");
+            log.warn("PersonId was empty.");
             person = null;
         }
 
@@ -311,8 +328,8 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
             @Override
             public Attributes getAttributes() {
-                assert person != null;
-                return person.getAttributes();
+                // Person kann bei dir null sein -> sichere Default-Attributes
+                return person != null ? person.getAttributes() : new AttributesImpl();
             }
         };
     }

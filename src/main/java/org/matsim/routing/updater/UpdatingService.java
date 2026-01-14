@@ -20,6 +20,7 @@ import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
 import event_sharing.EventSharingServiceGrpc;
 import event_sharing.EventSharing.*;
 import org.matsim.routing.router.TravelTimeSnapshot;
+
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -180,7 +181,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         // Einen unmodifizierbaren Snapshot für die Routing-Threads veröffentlichen
         // wir schicken eine Kopie, damit die Routing-Threads einen stabilen Stand haben,
         // während wir im nächsten Batch das internalTravelTimes weiter bearbeiten.
-        sharedTravelTime.updateWithArray(internalTravelTimes.clone());
-        //log.info("Snapshot published for {} links at t={}", affectedLinkIds.size(), timeNow);
+        long newSnapshotId = sharedTravelTime.updateWithArray(internalTravelTimes.clone(), timeNow);
+//        log.debug("Snapshot published id={} for {} links at t={}", newSnapshotId, affectedLinkIds.size(), timeNow);
     }
 }

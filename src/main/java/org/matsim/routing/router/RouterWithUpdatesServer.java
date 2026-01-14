@@ -87,8 +87,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.travelTimeCalculator().setTraveltimeBinSize(900);
 
         // Hoffentlich RAM sparen
-        config.removeModule("transitRouter");
-        config.removeModule("households");
+//        config.removeModule("transitRouter");
+//        config.removeModule("households");
         config.global().setInsistingOnDeprecatedConfigVersion(false);
 
         if (localFiles) {

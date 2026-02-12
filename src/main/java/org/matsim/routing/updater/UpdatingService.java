@@ -35,6 +35,9 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final ExecutorService updaterExecutor;
     private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
     private final double[] internalTravelTimes;         // Das Arbeits-Array
+    private final double binSizeSeconds;
+    private double nextBinStartSeconds;
+    private final Set<String> pendingAffectedLinkIds = new HashSet<>();
     //WIP
 //    private final Map<String, Id<Link>> linkIdCache;
 //    private final Map<String, Id<Vehicle>> vehicleIdCache;
@@ -65,6 +68,10 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         }
         // Wir starten mit dem initialen Stand (Free-Speed)
         this.internalTravelTimes = sharedTravelTime.getCurrentTimesArray().clone();
+        this.binSizeSeconds = sharedTravelTime.getWindowSizeSeconds();
+        double currentSnapshotTime = this.sharedTravelTime.getCurrentSnapshotTimestamp();
+        double currentBinStart = Math.floor(currentSnapshotTime / binSizeSeconds) * binSizeSeconds;
+        this.nextBinStartSeconds = currentBinStart + binSizeSeconds;
     }
 
     @Override
@@ -110,17 +117,26 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Empty> responseObserver) {
         updaterExecutor.execute(() -> {
             try {
-                Set<String> affectedLinkIds = new HashSet<>();
+//                Set<String> affectedLinkIds = new HashSet<>();
                 for (Request request : batchRequest.getRequestsList()) {
-                    // Link-Id für das spätere Snapshot-Update merken
+//                    // Link-Id für das spätere Snapshot-Update merken
+//                    if (!request.getLinkId().isEmpty()) {
+//                        affectedLinkIds.add(request.getLinkId());
+//                    }
+//                    processEvent(request);
+                    double now = request.getNow();
+                    // ggf. vorherigen Bin publishen (bevor wir dieses Event verarbeiten!)
+                    rollBinIfNeeded(now);
+
+                    // Link-Id für Snapshot am Bin-Übergang merken
                     if (!request.getLinkId().isEmpty()) {
-                        affectedLinkIds.add(request.getLinkId());
+                        pendingAffectedLinkIds.add(request.getLinkId());
                     }
                     processEvent(request);
                 }
 
-                double timeNow = batchRequest.getRequestsList().getLast().getNow();
-                publishNewSnapshot(timeNow, affectedLinkIds);
+//                double timeNow = batchRequest.getRequestsList().getLast().getNow();
+//                publishNewSnapshot(timeNow, affectedLinkIds);
 
                 responseObserver.onNext(Empty.getDefaultInstance());
                 responseObserver.onCompleted();
@@ -182,6 +198,28 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         // wir schicken eine Kopie, damit die Routing-Threads einen stabilen Stand haben,
         // während wir im nächsten Batch das internalTravelTimes weiter bearbeiten.
         long newSnapshotId = sharedTravelTime.updateWithArray(internalTravelTimes.clone(), timeNow);
-//        log.debug("Snapshot published id={} for {} links at t={}", newSnapshotId, affectedLinkIds.size(), timeNow);
+//         log.debug("Snapshot published id={} for {} links at t={}", newSnapshotId, affectedLinkIds.size(), timeNow);
+    }
+
+    /**
+     * Bei zeitlich sortierten Events reicht ein einfacher Vergleich:
+     * Wenn now >= nextBinStartSeconds, ist der vorherige Bin "voll" und kann gepublished werden.
+     * <p>
+     * Wichtig: vor processEvent(...) aufrufen, damit Events aus dem neuen Bin nicht in den alten Snapshot geraten.
+     */
+    private void rollBinIfNeeded(double nowSeconds) {
+        if (nowSeconds < nextBinStartSeconds) {
+            return;
+        }
+
+        // Snapshot soll den vorherigen Bin repräsentieren -> knapp vor nextBinStartSeconds abfragen
+        if (!pendingAffectedLinkIds.isEmpty()) {
+            publishNewSnapshot(Math.nextDown(nextBinStartSeconds), pendingAffectedLinkIds);
+            pendingAffectedLinkIds.clear();
+        }
+
+        // Falls wir mehrere Bins überspringen (großer Zeitsprung): direkt nach vorne springen (sorted!)
+        double binsAhead = Math.floor((nowSeconds - nextBinStartSeconds) / binSizeSeconds);
+        nextBinStartSeconds = nextBinStartSeconds + (binsAhead + 1.0) * binSizeSeconds;
     }
 }

@@ -59,6 +59,17 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 //    private final Map<String, Id<Link>> linkIdCache;
 //    private final Map<String, Person> personCache;
 
+    // === Routing request rate measurement (per sim-second, sliding window) ===
+
+    private static final int ROUTING_RATE_WINDOW = 60; // last 60 sim-seconds
+    private final java.util.concurrent.atomic.LongAdder[] routingBuckets =
+            new java.util.concurrent.atomic.LongAdder[ROUTING_RATE_WINDOW];
+    private final java.util.concurrent.atomic.AtomicLong[] routingBucketSecond =
+            new java.util.concurrent.atomic.AtomicLong[ROUTING_RATE_WINDOW];
+    private final java.util.concurrent.atomic.LongAdder realCount = new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.AtomicLong lastRealLogNs = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
+    private final java.util.concurrent.atomic.AtomicLong lastLoggedSimSecond = new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
+
     private final ConcurrentLinkedQueue<ProfilingEntry> profilingQueue = new ConcurrentLinkedQueue<>();
     private final Thread logWriterThread;
     private volatile boolean isRunning = true;
@@ -116,6 +127,12 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.logWriterThread.setName("Profiling-Writer");
         this.logWriterThread.setDaemon(true); // Stirbt automatisch, wenn der Server stoppt
         this.logWriterThread.start();
+
+        for (int i = 0; i < ROUTING_RATE_WINDOW; i++) {
+            routingBuckets[i] = new java.util.concurrent.atomic.LongAdder();
+            routingBucketSecond[i] = new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
+        }
+
     }
 
     public void warmUp() {
@@ -146,19 +163,21 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     public void getRoute(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
         long startTime = System.nanoTime();
 
+        recordRoutingRate(request);
+
         // Wichtig: Snapshot an den aktuellen Worker-Thread binden.
         // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
         travelTime.bindToTime(request.getNow());
-        log.debug(
-                "Routing request {} bound to snapshot {}, current snapshot is {}, with timestamp {}",
-                request.getRequestId(),
-                travelTime.getBoundSnapshotId(),
-                travelTime.getCurrentSnapshotId(),
-                travelTime.getBoundSnapshotTimestamp()
-        );
-        assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
 
+        assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
         try {
+//            log.debug(
+//                    "Routing request {} bound to snapshot {}, current snapshot is {}, with timestamp {}",
+//                    request.getRequestId(),
+//                    travelTime.getBoundSnapshotId(),
+//                    travelTime.getCurrentSnapshotId(),
+//                    travelTime.getBoundSnapshotTimestamp()
+//            );
             long currentHour = request.getNow() / 3600;
             if (lastLoggedHour.get() != currentHour) {
                 if (lastLoggedHour.getAndSet(currentHour) != currentHour) {
@@ -374,4 +393,45 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                                   long start, long duration, int travelTime, ByteString requestId) {
 
     }
+
+    private void recordRoutingRate(Routing.Request request) {
+        long simSecond = (long) request.getNow();
+        int idx = Math.floorMod(simSecond, ROUTING_RATE_WINDOW);
+        realCount.increment();
+        long nowNs = System.nanoTime();
+        long lastNs = lastRealLogNs.get();
+//        if (nowNs - lastNs > 1_000_000_000L && lastRealLogNs.compareAndSet(lastNs, nowNs)) {
+//            long c = realCount.sumThenReset();
+//            if (simSecond % 10 == 0 && lastLoggedSimSecond.getAndSet(simSecond) != simSecond) {
+//                log.info("Routing rate (real): ~{} req/s over last ~1s", c);
+//            }
+//        }
+        long prevSecond = routingBucketSecond[idx].get();
+        if (prevSecond != simSecond && routingBucketSecond[idx].compareAndSet(prevSecond, simSecond)) {
+            routingBuckets[idx].reset();
+        }
+
+        routingBuckets[idx].increment();
+
+        // Log nur gelegentlich (z.B. alle 10 Sim-Sekunden)
+        if (simSecond % 10 == 0) {
+            long sum = 0;
+            for (int i = 0; i < ROUTING_RATE_WINDOW; i++) {
+                long s = routingBucketSecond[i].get();
+                if (s >= simSecond - (ROUTING_RATE_WINDOW - 1)) {
+                    sum += routingBuckets[i].sum();
+                }
+            }
+            double avg = sum / (double) ROUTING_RATE_WINDOW;
+
+//            log.info(
+//                    "Routing rate: last {} sim-seconds avg = {} req/sim-s (current sim t={})",
+//                    ROUTING_RATE_WINDOW,
+//                    String.format("%.2f", avg),
+//                    simSecond
+//            );
+        }
+    }
+
+
 }

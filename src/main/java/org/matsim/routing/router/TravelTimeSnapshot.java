@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 1) Updates publizieren weiterhin atomar einen neuen Snapshot (publish/swap).
  * 2) Zusätzlich behalten wir Snapshots pro Zeitfenster (TripBin / BinStart) in einer kleinen History.
  * 3) Pro Routing-Request "binden" wir einmalig den passenden Snapshot an den aktuellen Thread (ThreadLocal),
- *    so dass alle getLinkTravelTime(...) Aufrufe innerhalb dieser Anfrage konsistent denselben Snapshot nutzen.
+ * so dass alle getLinkTravelTime(...) Aufrufe innerhalb dieser Anfrage konsistent denselben Snapshot nutzen.
  * <p>
  * Wichtig:
  * - Nach dem Publish werden Snapshot-Arrays NIE mehr verändert ("publish-and-never-mutate").
@@ -51,7 +51,7 @@ public class TravelTimeSnapshot implements TravelTime {
         }
     }
 
-    // Default-Bin-Größe: 900 Sekunden = 15 Minuten (wie TravelTimeCalculator default)
+    // Default-Bin-Größe: 900 Sekunden = 15 Minuten (TravelTimeCalculator default)
     public static final long DEFAULT_WINDOW_SIZE_SECONDS = 900L;
 
     /**
@@ -115,6 +115,7 @@ public class TravelTimeSnapshot implements TravelTime {
 
     /**
      * Konfigurierbarer Konstruktor.
+     *
      * @param windowSizeSeconds Größe eines Zeitfensters in Sekunden (z.B. 900)
      */
     public TravelTimeSnapshot(Network network, long windowSizeSeconds) {
@@ -173,7 +174,7 @@ public class TravelTimeSnapshot implements TravelTime {
      * <p>
      * Wichtig:
      * - newTimes MUSS ein neues Array sein (oder ein clone), das anschließend nicht mehr verändert wird.
-     *   Unser UpdatingService macht dafür internalTravelTimes.clone().
+     * Unser UpdatingService macht dafür internalTravelTimes.clone().
      *
      * @param newTimes   neues (immutable) Times-Array
      * @param nowSeconds Zeit (in Sekunden), zu der dieser Snapshot gilt (Request.now aus Events/Batch)
@@ -199,17 +200,46 @@ public class TravelTimeSnapshot implements TravelTime {
      * Für unser Setup:
      * Binde nach request.now (= rt) (ggf. departure_time (= dt)?).
      * <p>
-     * Auswahlregel:
-     * - wir nehmen den Snapshot für den Bin <= timeSeconds (floorEntry),
-     * - falls keiner existiert , fallback currentSnapshot.
+     * //     * Auswahlregel:
+     * //     * - wir nehmen den Snapshot für den Bin <= timeSeconds (floorEntry),
+     * //     * - falls keiner existiert , fallback currentSnapshot.
+     * Auswahlregel (konsistent, deterministisch, robust gegen Race Conditions):
+     * Wir binden NICHT den Snapshot des aktuellen Bins, sondern immer den Snapshot des vorherigen Bins
+     * ("one-bin lag"), d.h. targetBin = binStart(timeSeconds) - windowSizeSeconds.
+     * Wenn dieser Snapshot noch nicht publiziert wurde (Race Condition), nehmen wir den aktuellsten Snapshot,
+     * der bis targetBin verfügbar ist (floorEntry).
+     * Falls es gar keine History gibt, fallback auf initialen currentSnapshot.
      *
      * @param timeSeconds Zeit, zu der geroutet wird (bei uns grade request.now)
      */
     public void bindToTime(double timeSeconds) {
-        long bin = binStart(timeSeconds);
+//        long bin = binStart(timeSeconds);
+        long currentBin = binStart(timeSeconds);
+//        var entry = snapshotsByBinStart.floorEntry(bin);
+//        Snapshot snap = (entry != null) ? entry.getValue() : currentSnapshot.get();
 
-        var entry = snapshotsByBinStart.floorEntry(bin);
-        Snapshot snap = (entry != null) ? entry.getValue() : currentSnapshot.get();
+        // Immer einen Bin davor routen.
+        long targetBin = currentBin - windowSizeSeconds;
+        if (targetBin < 0) {
+            targetBin = 0;
+        }
+
+        Snapshot snap;
+        var entry = snapshotsByBinStart.floorEntry(targetBin);
+        if (entry != null) {
+            snap = entry.getValue();
+        } else {
+            // Sollte praktisch nie passieren, weil wir im Konstruktor (0L -> init) setzen.
+            // Aber für Robustheit: wenn History leer ist oder targetBin vor dem ersten Eintrag liegt.
+            var last = snapshotsByBinStart.lastEntry();
+            snap = (last != null) ? last.getValue() : currentSnapshot.get();
+        }
+
+        // Extremfall: sollte wegen Initialisierung im Konstruktor nie passieren.
+        // Für den Fall der Fälle: dennoch auf currentSnapshot zurückfallen, damit Requests immer routen können.
+        if (snap == null) {
+            snap = currentSnapshot.get();
+        }
 
         boundTimes.set(snap.times);
         boundSnapshotId.set(snap.id);
@@ -285,5 +315,9 @@ public class TravelTimeSnapshot implements TravelTime {
             times = currentSnapshot.get().times;
         }
         return times[linkIdToIndex.get(link.getId())];
+    }
+
+    public long getWindowSizeSeconds() {
+        return windowSizeSeconds;
     }
 }

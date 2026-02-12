@@ -99,6 +99,10 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         Scenario sharedScenario = ScenarioUtils.loadScenario(config);
         Injector sharedAdhocInjector = ControllerUtils.createAdhocInjector(sharedScenario);
 
+        // Anzahl Links im Network zählen und ausgeben
+        int linkCount = sharedScenario.getNetwork().getLinks().size();
+        log.info("Anzahl Links im Network: {}", linkCount);
+
         // Gemeinsame TravelTime-Snapshot-Instanz für Routing und Updates
         TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork());
         // TravelDisutility, die den Snapshot nutzt
@@ -230,6 +234,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         if (!warmUpLatch.await(60, TimeUnit.SECONDS)) {
             log.error("Warmup timed out! Some threads might not be ready.");
         }
+
+
         log.info("Warmup complete. Starting gRPC Server.");
 
         // Start server mit rpcExecutor

@@ -165,12 +165,14 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
         recordRoutingRate(request);
 
-        // Wichtig: Snapshot an den aktuellen Worker-Thread binden.
-        // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
-        travelTime.bindToTime(request.getNow());
-
-        assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
         try {
+            // Deterministische Snapshot-Bindung:
+            // blockiert, bis der für request.now benötigte one-bin-lag-Snapshot existiert
+            // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
+            //log.info("Getting route");
+            travelTime.bindToTime(request.getNow());
+
+            assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
 //            log.debug(
 //                    "Routing request {} bound to snapshot {}, current snapshot is {}, with timestamp {}",
 //                    request.getRequestId(),

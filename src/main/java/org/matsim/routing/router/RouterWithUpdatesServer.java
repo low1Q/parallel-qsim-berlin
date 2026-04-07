@@ -243,7 +243,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
                 .addService(routingService)
                 .addService(updatingService)
                 .addService(ProtoReflectionService.newInstance())
-                .executor(rpcExecutor)
+               // .executor(rpcExecutor)
                 .build()
                 .start();
 

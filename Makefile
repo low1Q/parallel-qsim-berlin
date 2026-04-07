@@ -239,8 +239,8 @@ $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml: $(op)/berlin-$(BV)-vehicl
 $(op)/berlin-$(BV)-network.xml.gz:
 	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/berlin-$(BV)-network.xml.gz -o $@
 
-$(op)/berlin-$(BV).config.xml:
-	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/berlin-$(BV).config.xml -o $@
+$(op)/berlin-$(BV)-$(PCT)pct.config.xml:
+	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/berlin-$(BV)-$(PCT)pct.config.xml -o $@
 
 $(op)/berlin-$(BV)-facilities.xml.gz:
 	curl https://svn.vsp.tu-berlin.de/repos/public-svn/matsim/scenarios/countries/de/berlin/berlin-$(BV)/input/berlin-$(BV)-facilities.xml.gz -o $@
@@ -299,6 +299,8 @@ run-routing: prepare
 		ARGS="$(ARGS) \
 		--set routing.mode=ad-hoc \
 		--router-ip $$ROUTER_URL \
+		--event-sharing-bin-size-secs 900 \
+		--event-sharing-closed-bin-batch-size 10000 \
 		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
 		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
 		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
@@ -331,7 +333,7 @@ convert-events:
 # ===== ROUTER =====
 
 router-deps: $(JAR) \
-             $(op)/berlin-$(BV).config.xml \
+             $(op)/berlin-$(BV)-$(PCT)pct.config.xml \
              $(op)/berlin-$(BV)-facilities.xml.gz \
              $(op)/berlin-$(BV)-network.xml.gz \
              $(op)/berlin-$(BV)-vehicleTypes.xml
@@ -343,6 +345,6 @@ router: router-deps
 	else \
 		EXTRA=""; \
 	fi; \
-	CMD="$(java_router) --config $(op)/berlin-$(BV).config.xml --sample $(PCT) --output $(op)/routing-$(RUN_ID) $$EXTRA --localFiles"; \
+	CMD="$(java_router) --config $(op)/berlin-$(BV)-$(PCT)pct.config.xml --sample $(PCT) --output $(op)/routing-$(RUN_ID) $$EXTRA --localFiles"; \
 	echo "$$CMD"; \
 	eval "$$CMD"

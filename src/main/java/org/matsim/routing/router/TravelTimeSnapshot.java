@@ -6,11 +6,14 @@ import org.matsim.api.core.v01.network.Network;
 import org.matsim.api.core.v01.population.Person;
 import org.matsim.core.router.util.TravelTime;
 import org.matsim.vehicles.Vehicle;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -32,6 +35,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * Wichtig:
  * - Nach dem Publish werden Snapshot-Arrays NIE mehr verändert ("publish-and-never-mutate").
  * - Mehrere Routing-Threads dürfen gleichzeitig aus demselben Snapshot lesen -> thread-safe & lockfrei im Hot-Path.
+ * -Für Determinismus wird NICHT mehr auf den "nächstbesten" älteren Snapshot zurückgefallen.
+ *  Falls der deterministisch benötigte Snapshot noch nicht existiert, blockiert bindToTime(...),
+ *  bis genau dieser Snapshot publiziert wurde.
  */
 public class TravelTimeSnapshot implements TravelTime {
 
@@ -50,6 +56,8 @@ public class TravelTimeSnapshot implements TravelTime {
             this.timestamp = timestamp;
         }
     }
+
+    private static final Logger log = LogManager.getLogger(TravelTimeSnapshot.class);
 
     // Default-Bin-Größe: 900 Sekunden = 15 Minuten (TravelTimeCalculator default)
     public static final long DEFAULT_WINDOW_SIZE_SECONDS = 900L;
@@ -105,6 +113,22 @@ public class TravelTimeSnapshot implements TravelTime {
      * Per Thread gebundener Snapshot-Timestamp (für Debug/Verifikation).
      */
     private final ThreadLocal<Double> boundSnapshotTimestamp = new ThreadLocal<>();
+
+    /**
+     * Monitor für blockierendes Warten, bis ein deterministisch benötigter Snapshot publiziert wurde.
+     */
+    private final Object snapshotMonitor = new Object();
+
+    /**
+     * Optional: gemessene Gesamt-Wartezeit aller Routing-Threads in Nanosekunden.
+     * Nützlich für die Evaluation.
+     */
+    private final AtomicLong totalWaitTimeNanos = new AtomicLong(0L);
+
+    /**
+     * Optional: Anzahl der Wait-Vorgänge.
+     */
+    private final AtomicLong totalWaitCount = new AtomicLong(0L);
 
     /**
      * Default-Konstruktor: windowSizeSeconds = 900s.
@@ -189,7 +213,11 @@ public class TravelTimeSnapshot implements TravelTime {
 
         // Zusätzlich in der History unter dem passenden Bin speichern
         long bin = binStart(nowSeconds);
-        snapshotsByBinStart.put(bin, snap);
+        synchronized (snapshotMonitor) {
+            snapshotsByBinStart.put(bin, snap);
+            snapshotMonitor.notifyAll();
+        }
+        //log.info("History: {}", snapshotsByBinStart);
 
         return id;
     }
@@ -211,35 +239,72 @@ public class TravelTimeSnapshot implements TravelTime {
      * Falls es gar keine History gibt, fallback auf initialen currentSnapshot.
      *
      * @param timeSeconds Zeit, zu der geroutet wird (bei uns grade request.now)
+     *
+     * Bindet den deterministisch korrekten Snapshot an den aktuellen Thread.
+     *
+     * Semantik:
+     * - currentBin = binStart(timeSeconds)
+     * - wegen one-bin lag wird targetBin = currentBin - windowSizeSeconds verwendet
+     * - falls dieser Snapshot noch nicht existiert, wird BLOCKIERT, bis er publiziert wurde
+     *
+     * Es gibt bewusst KEINEN stillen Fallback mehr auf floorEntry(...), weil das den
+     * Determinismus verletzen könnte.
+     *
+     * @param timeSeconds Zeit, zu der geroutet wird (bei euch request.now)
      */
-    public void bindToTime(double timeSeconds) {
-//        long bin = binStart(timeSeconds);
-        long currentBin = binStart(timeSeconds);
-//        var entry = snapshotsByBinStart.floorEntry(bin);
-//        Snapshot snap = (entry != null) ? entry.getValue() : currentSnapshot.get();
 
+    public void bindToTime(double timeSeconds) {
+        long currentBin = binStart(timeSeconds);
         // Immer einen Bin davor routen.
-        long targetBin = currentBin - windowSizeSeconds;
+        long targetBin = currentBin - 2 * windowSizeSeconds;
         if (targetBin < 0) {
             targetBin = 0;
         }
 
         Snapshot snap;
-        var entry = snapshotsByBinStart.floorEntry(targetBin);
-        if (entry != null) {
-            snap = entry.getValue();
-        } else {
-            // Sollte praktisch nie passieren, weil wir im Konstruktor (0L -> init) setzen.
-            // Aber für Robustheit: wenn History leer ist oder targetBin vor dem ersten Eintrag liegt.
-            var last = snapshotsByBinStart.lastEntry();
-            snap = (last != null) ? last.getValue() : currentSnapshot.get();
+        long waitStart = System.nanoTime();
+        boolean didWait = false;
+        synchronized (snapshotMonitor) {
+            while ((snap = snapshotsByBinStart.get(targetBin)) == null) {
+                didWait = true;
+                //log.info("Warte auf Time-Bin {}, ", targetBin);
+                try {
+                    snapshotMonitor.wait(1000L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(
+                            "Interrupted while waiting for snapshot for bin " + targetBin, e);
+                }
+                long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStart);
+                if (waitedMs > 60_000L) {
+                    throw new IllegalStateException(
+                            "Waited more than 60s for snapshot of bin " + targetBin +
+                                    ". This suggests the updater is not publishing required bins.");
+                }
+            }
+        }
+        long waitedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - waitStart);
+        if (didWait) {
+            //log.info("Warten auf Time-Bin {} nach {} ms erfolgreich.", targetBin, waitedMs);
+            totalWaitCount.incrementAndGet();
+            totalWaitTimeNanos.addAndGet(System.nanoTime() - waitStart);
         }
 
-        // Extremfall: sollte wegen Initialisierung im Konstruktor nie passieren.
-        // Für den Fall der Fälle: dennoch auf currentSnapshot zurückfallen, damit Requests immer routen können.
-        if (snap == null) {
-            snap = currentSnapshot.get();
-        }
+//        var entry = snapshotsByBinStart.floorEntry(targetBin);
+//        if (entry != null) {
+//            snap = entry.getValue();
+//        } else {
+//            // Sollte praktisch nie passieren, weil wir im Konstruktor (0L -> init) setzen.
+//            // Aber für Robustheit: wenn History leer ist oder targetBin vor dem ersten Eintrag liegt.
+//            var last = snapshotsByBinStart.lastEntry();
+//            snap = (last != null) ? last.getValue() : currentSnapshot.get();
+//        }
+//
+//        // Extremfall: sollte wegen Initialisierung im Konstruktor nie passieren.
+//        // Für den Fall der Fälle: dennoch auf currentSnapshot zurückfallen, damit Requests immer routen können.
+//        if (snap == null) {
+//            snap = currentSnapshot.get();
+//        }
 
         boundTimes.set(snap.times);
         boundSnapshotId.set(snap.id);
@@ -312,12 +377,23 @@ public class TravelTimeSnapshot implements TravelTime {
         double[] times = boundTimes.get();
         if (times == null) {
             // Fallback: wenn jemand vergisst zu binden, nehmen wir den aktuellsten Snapshot
-            times = currentSnapshot.get().times;
+            // times = currentSnapshot.get().times;
+            throw new IllegalStateException(
+                    "TravelTimeSnapshot accessed without thread binding. " +
+                            "RoutingService must call bindToTime(...) before routing.");
         }
         return times[linkIdToIndex.get(link.getId())];
     }
 
     public long getWindowSizeSeconds() {
         return windowSizeSeconds;
+    }
+
+    public long getTotalWaitTimeNanos() {
+        return totalWaitTimeNanos.get();
+    }
+
+    public long getTotalWaitCount() {
+        return totalWaitCount.get();
     }
 }

@@ -4,7 +4,12 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.name.Names;
 import com.google.protobuf.Empty;
+import event_sharing.EventSharing.BatchRequest;
+import event_sharing.EventSharing.Request;
+import event_sharing.EventSharingServiceGrpc;
 import io.grpc.stub.StreamObserver;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.matsim.api.core.v01.Id;
@@ -17,13 +22,20 @@ import org.matsim.api.core.v01.network.Link;
 import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.core.events.EventsUtils;
 import org.matsim.core.trafficmonitoring.TravelTimeCalculator;
-import event_sharing.EventSharingServiceGrpc;
-import event_sharing.EventSharing.*;
 import org.matsim.routing.router.TravelTimeSnapshot;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 
 public class UpdatingService extends EventSharingServiceGrpc.EventSharingServiceImplBase {
     private static final Logger log = LogManager.getLogger(UpdatingService.class);
@@ -35,25 +47,25 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final ExecutorService updaterExecutor;
     private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
     private final double[] internalTravelTimes;         // Das Arbeits-Array
-//    private final double binSizeSeconds;
-//    private double nextBinStartSeconds;
     private final Set<String> pendingAffectedLinkIds = new HashSet<>();
-    //WIP
-//    private final Map<String, Id<Link>> linkIdCache;
-//    private final Map<String, Id<Vehicle>> vehicleIdCache;
+
+    //Profiling
+    private final ConcurrentLinkedQueue<UpdatingProfilingEntry> updatingProfilingQueue = new ConcurrentLinkedQueue<>();
+    private final Thread updatingLogWriterThread;
+    private volatile boolean updatingLoggingIsRunning = true;
+    private final String runContext;
+
+    private final java.util.concurrent.atomic.AtomicLong rejectedBatchCount = new java.util.concurrent.atomic.AtomicLong(0);
 
     public UpdatingService(Scenario sharedScenario,
                            Injector sharedAdhocInjector,
                            Runnable shutdown,
                            ExecutorService updaterExecutor,
-                           TravelTimeSnapshot sharedTravelTime) {
+                           TravelTimeSnapshot sharedTravelTime, String runContext) {
         this.scenario = sharedScenario;
         this.shutdown = shutdown;
         this.updaterExecutor = updaterExecutor;
         this.sharedTravelTime = sharedTravelTime;
-        //WIP
-//        this.linkIdCache = linkIdCache;
-//        this.vehicleIdCache = vehicleIdCache;
 
         // Events-Manager und TravelTimeCalculator initialisieren
         this.eventsManager = EventsUtils.createEventsManager();
@@ -68,102 +80,142 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         }
         // Wir starten mit dem initialen Stand (Free-Speed)
         this.internalTravelTimes = sharedTravelTime.getCurrentTimesArray().clone();
-//        this.binSizeSeconds = sharedTravelTime.getWindowSizeSeconds();
-//        double currentSnapshotTime = this.sharedTravelTime.getCurrentSnapshotTimestamp();
-//        double currentBinStart = Math.floor(currentSnapshotTime / binSizeSeconds) * binSizeSeconds;
-//        this.nextBinStartSeconds = currentBinStart + binSizeSeconds;
+        this.updatingLogWriterThread = new Thread(this::continuousUpdatingLoggingLoop);
+        this.updatingLogWriterThread.setName("updating-profiling-writer");
+        this.updatingLogWriterThread.setDaemon(true);
+        this.updatingLogWriterThread.start();
+        this.runContext = runContext;
     }
 
     @Override
     public void shutdown(Empty request, StreamObserver<Empty> responseObserver) {
         log.info("Received shutdown request");
+        log.info("EventCount: {}" ,eventCount);
+        updatingLoggingIsRunning = false;
+
+        try {
+            updatingLogWriterThread.join(2000);
+        } catch (InterruptedException e) {
+            log.warn("Shutdown interrupted while waiting for updating profiling writer");
+            Thread.currentThread().interrupt();
+        }
+
         log.info("Shutting down updating service");
         responseObserver.onNext(Empty.getDefaultInstance());
         responseObserver.onCompleted();
         new Thread(shutdown).start();
     }
 
-    @Override
-    public void updateRouterSingleEvent(Request request, StreamObserver<Ack> responseObserver) {
-        updaterExecutor.execute(() -> {
-            try {
-                Set<String> affectedLinkIds = new HashSet<>();
-                // Link-Id für das spätere Snapshot-Update merken
-                if (!request.getLinkId().isEmpty()) {
-                    affectedLinkIds.add(request.getLinkId());
-                }
+    private static String uuidBytesToString(com.google.protobuf.ByteString bytes) {
+        byte[] arr = bytes.toByteArray();
+        if (arr.length != 16) {
+            throw new IllegalArgumentException(
+                    "batch_id must contain exactly 16 bytes for a UUID, but got " + arr.length
+            );
+        }
 
-                processEvent(request);
-
-                double timeNow = request.getNow();
-                publishNewSnapshot(timeNow, affectedLinkIds);
-
-                Ack response = Ack.newBuilder().
-                        setMessageReceived(true).
-                        build();
-
-                responseObserver.onNext(response);
-                responseObserver.onCompleted();
-            } catch (Exception e) {
-                log.error("Fehler im Batch-Update", e);
-                responseObserver.onError(io.grpc.Status.INTERNAL
-                        .withDescription("Processing failed: " + e.getMessage())
-                        .asException());
-            }
-        });
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(arr);
+        long high = bb.getLong();
+        long low = bb.getLong();
+        return new java.util.UUID(high, low).toString();
     }
-
+    int eventCount = 0;
     @Override
     public void updateRouterBatch(BatchRequest batchRequest, StreamObserver<Empty> responseObserver) {
-        updaterExecutor.execute(() -> {
-            try {
-//                log.info("Received batch: publish_snapshot={}, completed_bin=[{}, {}), empty_bin={}, events={}",
-//                        batchRequest.getPublishSnapshot(),
-//                        batchRequest.getCompletedBinStart(),
-//                        batchRequest.getCompletedBinEnd(),
-//                        batchRequest.getEmptyBin(),
-//                        batchRequest.getRequestsCount());
-                for (Request request : batchRequest.getRequestsList()) {
-                    // Link-Id für Snapshot am Bin-Übergang merken
-                    if (!request.getLinkId().isEmpty()) {
-                        pendingAffectedLinkIds.add(request.getLinkId());
+        try {
+            updaterExecutor.execute(() -> {
+                long batchReceivedNs = unixNanosNow();
+                long totalStartNs = System.nanoTime();
+                try {
+                    long batchSentAtNs = batchRequest.getGrpcBatchSentAtRealtime();
+                    long batchDeliveryRustToJavaLatencyNs =
+                            batchSentAtNs > 0
+                                    ? Math.max(0L, batchReceivedNs - batchSentAtNs)
+                                    : 0L;
+
+                    int requestsCount = batchRequest.getRequestsCount();
+                    long firstEventNow = requestsCount > 0 ? batchRequest.getRequestsList().get(0).getNow() : -1L;
+                    long lastEventNow = requestsCount > 0 ? batchRequest.getRequestsList().get(requestsCount - 1).getNow() : -1L;
+
+                    String batchIdStr = uuidBytesToString(batchRequest.getBatchId());
+                    long processingStartNs = System.nanoTime();
+                    long eventsLifespanSum = 0L;
+                    for (Request request : batchRequest.getRequestsList()) {
+                        // Link-Id für Snapshot am Bin-Übergang merken
+                        if (!request.getLinkId().isEmpty()) {
+                            pendingAffectedLinkIds.add(request.getLinkId());
+                        }
+                        processEvent(request);
+                        long eventDetectedAtRust = request.getEventDetectedAtRealtime();
+                        long eventFromDetectedToProcessed = unixNanosNow() - eventDetectedAtRust;
+                        eventsLifespanSum += eventFromDetectedToProcessed;
                     }
-                    processEvent(request);
-                }
+                    eventCount = eventCount + batchRequest.getRequestsCount();
+                    float avgEventLifespan = requestsCount > 0 ? eventsLifespanSum / (float) requestsCount : 0f;
 
-                if (batchRequest.getPublishSnapshot()) {
-                    double publishTime = Math.nextDown(batchRequest.getCompletedBinEnd());
+                    long processingEndNs = System.nanoTime();
+                    long batchProcessingNs = processingEndNs - processingStartNs;
 
-                    if (batchRequest.getEmptyBin()) {
-                        log.warn("Publishing empty snapshot for bin [{}, {})",
-                                batchRequest.getCompletedBinStart(),
-                                batchRequest.getCompletedBinEnd());
+                    int affectedLinksBeforePublish = pendingAffectedLinkIds.size();
+                    long publishDurationNs = 0L;
+                    long snapshotId = -1L;
+                    double publishTimeNow = Double.NaN;
+
+                    if (batchRequest.getPublishSnapshot()) {
+                        publishTimeNow = Math.nextDown(batchRequest.getCompletedBinEnd());
+
+                        if (batchRequest.getEmptyBin()) {
+                            log.warn("Publishing empty snapshot for bin [{}, {})",
+                                    batchRequest.getCompletedBinStart(),
+                                    batchRequest.getCompletedBinEnd());
+                        }
+
+                        long publishStartNs = System.nanoTime();
+                        snapshotId = publishNewSnapshot(publishTimeNow, pendingAffectedLinkIds);
+                        long publishEndNs = System.nanoTime();
+                        publishDurationNs = publishEndNs - publishStartNs;
+                        pendingAffectedLinkIds.clear();
                     }
-//                    } else {
-//                        log.info("Publishing snapshot for bin [{}, {}) with {} affected links",
-//                                batchRequest.getCompletedBinStart(),
-//                                batchRequest.getCompletedBinEnd(),
-//                                pendingAffectedLinkIds.size());
-//                    }
+                    responseObserver.onNext(Empty.getDefaultInstance());
+                    responseObserver.onCompleted();
 
-                    publishNewSnapshot(publishTime, pendingAffectedLinkIds);
-                    pendingAffectedLinkIds.clear();
+                    long totalEndNs = System.nanoTime();
+                    long totalUpdateNs = totalEndNs - totalStartNs;
+
+                    updatingProfilingQueue.add(new UpdatingProfilingEntry(
+                            batchIdStr,
+                            batchReceivedNs,
+                            batchSentAtNs,
+                            batchDeliveryRustToJavaLatencyNs,
+                            batchRequest.getPublishSnapshot(),
+                            batchRequest.getCompletedBinStart(),
+                            batchRequest.getCompletedBinEnd(),
+                            batchRequest.getEmptyBin(),
+                            requestsCount,
+                            firstEventNow,
+                            lastEventNow,
+                            batchProcessingNs,
+                            publishDurationNs,
+                            totalUpdateNs,
+                            affectedLinksBeforePublish,
+                            snapshotId,
+                            publishTimeNow,
+                            rejectedBatchCount.get(),
+                            avgEventLifespan
+                    ));
+                } catch (Exception e) {
+                    log.error("Fehler im Batch-Update", e);
+                    responseObserver.onError(io.grpc.Status.INTERNAL
+                            .withDescription("Processing failed: " + e.getMessage())
+                            .asException());
                 }
-
-                responseObserver.onNext(Empty.getDefaultInstance());
-                responseObserver.onCompleted();
-            } catch (RejectedExecutionException e) {
-                // Die Queue ist voll! Wir geben dem Client ein Signal zum Warten (Backpressure)
-                responseObserver.onError(io.grpc.Status.RESOURCE_EXHAUSTED
-                        .withDescription("Updater is overloaded. Try again later.")
-                        .asException());
-            } catch (Exception e) {
-                log.error("Fehler im Batch-Update", e);
-                responseObserver.onError(io.grpc.Status.INTERNAL
-                        .withDescription("Processing failed: " + e.getMessage())
-                        .asException());
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            // Die Queue ist voll! Wir geben dem Client ein Signal zum Warten (Backpressure)
+            responseObserver.onError(io.grpc.Status.RESOURCE_EXHAUSTED
+                    .withDescription("Updater is overloaded. Try again later.")
+                    .asException());
+        }
     }
 
     private void processEvent(Request request) {
@@ -190,7 +242,7 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
      * Erstellt einen neuen konsistenten Snapshot, aktualisiert aber nur die
      * Links, die im aktuellen Batch verändert wurden.
      */
-    private void publishNewSnapshot(double timeNow, Collection<String> affectedLinkIds) {
+    private long publishNewSnapshot(double timeNow, Collection<String> affectedLinkIds) {
         var linkTravelTimes = travelTimeCalculator.getLinkTravelTimes();
         var networkLinks = scenario.getNetwork().getLinks();
 
@@ -213,30 +265,106 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         // Einen unmodifizierbaren Snapshot für die Routing-Threads veröffentlichen
         // wir schicken eine Kopie, damit die Routing-Threads einen stabilen Stand haben,
         // während wir im nächsten Batch das internalTravelTimes weiter bearbeiten.
-        long newSnapshotId = sharedTravelTime.updateWithArray(internalTravelTimes.clone(), timeNow);
-         //log.debug("Snapshot published id={} for {} links at t={}", newSnapshotId, affectedLinkIds.size(), timeNow);
+        return sharedTravelTime.updateWithArray(internalTravelTimes.clone(), timeNow);
+        //log.debug("Snapshot published id={} for {} links at t={}", newSnapshotId, affectedLinkIds.size(), timeNow);
     }
 
-//    /**
-//     * Bei zeitlich sortierten Events reicht ein einfacher Vergleich:
-//     * Wenn now >= nextBinStartSeconds, ist der vorherige Bin "voll" und kann gepublished werden.
-//     * <p>
-//     * Wichtig: vor processEvent(...) aufrufen, damit Events aus dem neuen Bin nicht in den alten Snapshot geraten.
-//     */
-//    private void rollBinIfNeeded(double nowSeconds) {
-//        if (nowSeconds < nextBinStartSeconds) {
-//            return;
-//        }
-//
-//        // Snapshot soll den vorherigen Bin repräsentieren -> knapp vor nextBinStartSeconds abfragen
-//        //if (!pendingAffectedLinkIds.isEmpty()) {
-//            publishNewSnapshot(Math.nextDown(nextBinStartSeconds), pendingAffectedLinkIds);
-//            pendingAffectedLinkIds.clear();
-//        //}
-//
-//        // Falls wir mehrere Bins überspringen (großer Zeitsprung): direkt nach vorne springen (sorted!)
-//        double binsAhead = Math.floor((nowSeconds - nextBinStartSeconds) / binSizeSeconds);
-//        nextBinStartSeconds = nextBinStartSeconds + (binsAhead + 1.0) * binSizeSeconds;
-//        log.info("Snapshot für time {} published", nowSeconds);
-//    }
+    private void continuousUpdatingLoggingLoop() {
+        DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
+        String t = LocalDateTime.now().format(dateTimeFormatter);
+        String outputFile = scenario.getConfig().controller().getOutputDirectory()
+                + "/java-updating-profiling-"
+                + runContext
+                + "-"
+                + t
+                + ".csv";
+
+        log.info("Starting async updating profiling writer to: {}", outputFile);
+
+        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(outputFile));
+             CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder()
+                     .setHeader(
+                             "batch_id",
+                             "batch_received_realtime_ns",
+                             "batch_sent_at_realtime_ns",
+                             "batch_delivery_rust_to_java_latency_ns",
+                             "publish_snapshot",
+                             "completed_bin_start",
+                             "completed_bin_end",
+                             "empty_bin",
+                             "requests_count",
+                             "first_event_now",
+                             "last_event_now",
+                             "batch_processing_ns",
+                             "publish_duration_ns",
+                             "total_update_ns",
+                             "affected_links_before_publish",
+                             "snapshot_id",
+                             "publish_time_now",
+                             "rejected_count",
+                             "avgEventLifespan"
+                     )
+                     .get())) {
+
+            while (updatingLoggingIsRunning || !updatingProfilingQueue.isEmpty()) {
+                UpdatingProfilingEntry entry = updatingProfilingQueue.poll();
+                if (entry != null) {
+                    csv.printRecord(
+                            entry.batchId(),
+                            entry.batchReceivedRealtimeNs(),
+                            entry.batchSentAtRealtimeNs(),
+                            entry.batchDeliveryRustToJavaLatencyNs(),
+                            entry.publishSnapshot(),
+                            entry.completedBinStart(),
+                            entry.completedBinEnd(),
+                            entry.emptyBin(),
+                            entry.requestsCount(),
+                            entry.firstEventNow(),
+                            entry.lastEventNow(),
+                            entry.batchProcessingNs(),
+                            entry.publishDurationNs(),
+                            entry.totalUpdateNs(),
+                            entry.affectedLinksBeforePublish(),
+                            entry.snapshotId(),
+                            entry.publishTimeNow(),
+                            entry.rejectedCount(),
+                            entry.avgEventLifespan()
+                    );
+                } else {
+                    Thread.sleep(100);
+                }
+            }
+            csv.flush();
+        } catch (IOException | InterruptedException e) {
+            log.error("Error in updating profiling writer thread", e);
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private record UpdatingProfilingEntry(
+            String batchId,
+            long batchReceivedRealtimeNs,
+            long batchSentAtRealtimeNs,
+            long batchDeliveryRustToJavaLatencyNs,
+            boolean publishSnapshot,
+            long completedBinStart,
+            long completedBinEnd,
+            boolean emptyBin,
+            int requestsCount,
+            long firstEventNow,
+            long lastEventNow,
+            long batchProcessingNs,
+            long publishDurationNs,
+            long totalUpdateNs,
+            int affectedLinksBeforePublish,
+            long snapshotId,
+            double publishTimeNow,
+            long rejectedCount,
+            float avgEventLifespan) {
+    }
+
+    private static long unixNanosNow() {
+        Instant now = Instant.now();
+        return now.getEpochSecond() * 1_000_000_000L + now.getNano();
+    }
 }

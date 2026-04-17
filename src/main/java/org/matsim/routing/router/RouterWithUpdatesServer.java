@@ -11,13 +11,15 @@ import io.grpc.protobuf.services.ProtoReflectionService;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.matsim.api.core.v01.Id;
+import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.network.Link;
 import org.matsim.api.core.v01.population.Person;
 import org.matsim.application.MATSimAppCommand;
 import org.matsim.core.config.Config;
 import org.matsim.core.config.ConfigUtils;
 import org.matsim.core.config.groups.RoutingConfigGroup;
-import org.matsim.core.controler.*;
+import org.matsim.core.controler.ControllerUtils;
+import org.matsim.core.controler.OutputDirectoryHierarchy;
 import org.matsim.core.router.costcalculators.OnlyTimeDependentTravelDisutilityFactory;
 import org.matsim.core.router.speedy.SpeedyALTDataBridge;
 import org.matsim.core.router.speedy.SpeedyGraph;
@@ -25,8 +27,6 @@ import org.matsim.core.router.speedy.SpeedyGraphBuilder;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.router.util.TravelTime;
 import org.matsim.core.scenario.ScenarioUtils;
-import org.matsim.api.core.v01.Scenario;
-
 import org.matsim.routing.updater.UpdatingService;
 import org.matsim.vehicles.Vehicle;
 import org.matsim.vehicles.VehicleType;
@@ -36,8 +36,8 @@ import picocli.CommandLine;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
@@ -61,8 +61,30 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
     @CommandLine.Option(names = "--threads", description = "Number of threads to use for routing")
     private int numRoutingThreads = 1;
 
-    public static void main(String[] args) throws IOException, InterruptedException {
+    @CommandLine.Option(names = "--binSize", description = "Bin size for the Travel Time Calculator und Travel Time Snapshot")
+    private long binSize = 900;
+
+    @CommandLine.Option(names = "--pH", description = "preplanning horizon for filtering the plans file (in seconds, default: 600s = 10min)")
+    private int preplanningHorizon = 600;
+
+    @CommandLine.Option(names = "--batchSize", description = "Batch size for Rust")
+    private int batchSize = 10000;
+
+    @CommandLine.Option(names = "--partitionCount", description = "Partition count for Rust")
+    private int partitionCount = 4;
+
+    @CommandLine.Option(names = "--addString", description = "Additional string to manuell add to the output directory name")
+    private String addContextAsString = "";
+
+    static void main(String[] args) throws IOException, InterruptedException {
         new RouterWithUpdatesServer().execute(args);
+    }
+
+    private static String sanitizeForFilename(String s) {
+        if (s == null || s.isBlank()) {
+            return "";
+        }
+        return s.trim().replaceAll("[^a-zA-Z0-9._-]+", "_");
     }
 
     @Override
@@ -84,11 +106,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.qsim().setEndTime(86400);
         // RoutingService ThreadLocal Warmup beschleunigen
         config.routing().setNetworkRouteConsistencyCheck(RoutingConfigGroup.NetworkRouteConsistencyCheck.disable);
-        config.travelTimeCalculator().setTraveltimeBinSize(900);
+        config.travelTimeCalculator().setTraveltimeBinSize(binSize);
 
-        // Hoffentlich RAM sparen
-//        config.removeModule("transitRouter");
-//        config.removeModule("households");
         config.global().setInsistingOnDeprecatedConfigVersion(false);
 
         if (localFiles) {
@@ -99,12 +118,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         Scenario sharedScenario = ScenarioUtils.loadScenario(config);
         Injector sharedAdhocInjector = ControllerUtils.createAdhocInjector(sharedScenario);
 
-        // Anzahl Links im Network zählen und ausgeben
-        int linkCount = sharedScenario.getNetwork().getLinks().size();
-        log.info("Anzahl Links im Network: {}", linkCount);
-
         // Gemeinsame TravelTime-Snapshot-Instanz für Routing und Updates
-        TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork());
+        TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork(), binSize);
         // TravelDisutility, die den Snapshot nutzt
         TravelDisutility dynamicDisutility = new org.matsim.core.router.util.TravelDisutility() {
             @Override
@@ -134,36 +149,18 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Fahrzeuge für alle Personen vorbereiten
         prepareVehicles(sharedScenario);
 
-        // Schnellzugriffs-Maps für IDs erstellen | WIP
-//        log.info("Creating fast lookup maps...");
-//        Map<String, Id<Link>> linkIdCache = new HashMap<>();
-//
-//        for (Id<Link> id : sharedScenario.getNetwork().getLinks().keySet()) {
-//            linkIdCache.put(id.toString(), id);
-//        }
-//        Map<String, Person> personCache = new HashMap<>();
-//        for (Person p : sharedScenario.getPopulation().getPersons().values()) {
-//            personCache.put(p.getId().toString(), p);
-//        }
-//        Map<String, Id<Vehicle>> vehicleIdCache = new HashMap<>();
-//
-//        // Cache all Vehicle IDs if you have a fixed fleet
-//        for (Id<Vehicle> id : sharedScenario.getVehicles().getVehicles().keySet()) {
-//            vehicleIdCache.put(id.toString(), id);
-//        }
-
         RejectedExecutionHandler loggingHandler = (runnable, executor) -> {
-            log.warn("BACKPRESSURE: Routing-Queue ist voll! Request wird im gRPC-Netzwerk-Thread ausgeführt. Performance sinkt!");
-            new ThreadPoolExecutor.CallerRunsPolicy().rejectedExecution(runnable, executor);
+            log.warn("BACKPRESSURE: Routing-Queue ist voll! Request wird abgewiesen");
+            throw new RejectedExecutionException("Routing queue full");
         };
 
         // Definiere die spezialisierten Worker-Pools
         // Routing-Threads (Lese-Zugriffe)
-        int numThreads = (numRoutingThreads > 0) ? numRoutingThreads : Runtime.getRuntime().availableProcessors();
-        ExecutorService rpcExecutor = new ThreadPoolExecutor(
-                numThreads, numThreads, // Fixe Anzahl Threads passend zur CPU, wenn numRoutingThreads <= 0
+        int numThreads = (numRoutingThreads > 0) ? numRoutingThreads : Runtime.getRuntime().availableProcessors() - 1;
+        ExecutorService routingExecutor = new ThreadPoolExecutor(
+                numThreads, numThreads, // Fixe Anzahl Threads passend zur CPU, wenn numRoutingThreads ≤ 0
                 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(1000), // Begrenzte Queue gegen Memory-Overflow
+                new ArrayBlockingQueue<>(1000), // Begrenzte Queue gegen Memory-Overflow
                 new ThreadFactoryBuilder().setNameFormat("router-thread-%d").build(),
                 loggingHandler // Backpressure-Mechanismus
         );
@@ -171,60 +168,60 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Update-Thread (Schreib-Zugriffe: IMMER Single-Threaded!)
         ExecutorService updaterExecutor = new ThreadPoolExecutor(
                 1, 1, 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(500),
+                new ArrayBlockingQueue<>(500),
                 new ThreadFactoryBuilder().setNameFormat("updater-%d").setDaemon(true).build(),
                 new ThreadPoolExecutor.AbortPolicy() // Wirft eine Exception bei Überlastung
         );
 
-        // Erzeuge Services mit den neuen public-Konstruktoren
-        Runnable shutdown = () -> {
-            log.info("Running shutdown hook");
-            // nothing here; actual Server shutdown handled below
-        };
-
         AtomicReference<Server> serverRef = new AtomicReference<>();
-
+        AtomicBoolean shutdownStarted = new AtomicBoolean(false);
         // Definiere die Logik für das saubere Aufräumen
         Runnable serverShutdown = () -> {
-            log.info("HPC Cleanup: Shutting down server and pools...");
-
+            if (!shutdownStarted.compareAndSet(false, true)) {
+                log.info("Cleanup: shutdown already in motion, skipping duplicate call.");
+                return;
+            }
+            log.info("Cleanup: Shutting down server...");
             // Server stoppen
             Server s = serverRef.get();
             if (s != null) {
                 s.shutdown();
                 try {
-                    if (!s.awaitTermination(5, TimeUnit.SECONDS)) s.shutdownNow();
+                    if (!s.awaitTermination(5, TimeUnit.SECONDS)) {
+                        s.shutdownNow();
+                    }
                 } catch (InterruptedException e) {
                     s.shutdownNow();
+                    Thread.currentThread().interrupt();
                 }
             }
 
+            log.info("Cleanup: Shutting down pools...");
+
             // Pools stoppen (Graceful Shutdown)
             updaterExecutor.shutdownNow();
-            rpcExecutor.shutdownNow();
+            routingExecutor.shutdownNow();
 
-            log.info("HPC Cleanup: All resources released.");
+            log.info("Cleanup: All resources released.");
         };
 
-        // Registriere es beim Betriebssystem
-        Runtime.getRuntime().addShutdownHook(new Thread(serverShutdown));
-
+        String runContext = buildRunContextString();
+        log.info("Java profiling run context: {}", runContext);
         // setze reale shutdown hooks in Services (optional)
-        // (Hier einfache Zuordnung)
         UpdatingService updatingService = new UpdatingService(sharedScenario, sharedAdhocInjector,
-                serverShutdown, updaterExecutor, sharedTravelTime);
+                serverShutdown, updaterExecutor, sharedTravelTime, runContext);
         RoutingService routingService = new RoutingService(sharedScenario, sharedAdhocInjector,
-                serverShutdown, config, sharedTravelTime, sharedLandmarks, dynamicDisutility);
+                serverShutdown, config, sharedTravelTime, sharedLandmarks, dynamicDisutility, routingExecutor, runContext, preplanningHorizon);
 
         // Eager Warmup (Direkt auf dem rpcExecutor)
-        log.info("Starting High-Performance Eager Warmup on {} threads...", numThreads);
+        log.info("Starting Eager Warmup on {} threads...", numThreads);
         CountDownLatch warmUpLatch = new CountDownLatch(numThreads);
 
         for (int i = 0; i < numThreads; i++) {
-            rpcExecutor.submit(() -> {
+            routingExecutor.submit(() -> {
                 try {
                     routingService.warmUp();
-                    log.info("Worker thread {} is now JIT-optimized and ready.", Thread.currentThread().getName());
+                    log.info("Worker thread {} is now ready.", Thread.currentThread().getName());
                 } finally {
                     warmUpLatch.countDown();
                 }
@@ -243,7 +240,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
                 .addService(routingService)
                 .addService(updatingService)
                 .addService(ProtoReflectionService.newInstance())
-               // .executor(rpcExecutor)
                 .build()
                 .start();
 
@@ -254,7 +250,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         server.awaitTermination();
 
         log.info("Server stopped");
-        System.exit(0);
         return 0;
     }
 
@@ -290,4 +285,20 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             scenario.getVehicles().addVehicle(vehicle);
         }
     }
+
+    private String buildRunContextString() {
+        String custom = sanitizeForFilename(addContextAsString);
+
+        String base = String.format(
+                "bin%d-threads%d-PH%d-batch%d-parts%d",
+                binSize,
+                numRoutingThreads,
+                preplanningHorizon,
+                batchSize,
+                partitionCount
+        );
+
+        return custom.isEmpty() ? base : base + "-" + custom;
+    }
+
 }

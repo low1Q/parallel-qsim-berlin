@@ -4,6 +4,7 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
+import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
@@ -15,9 +16,11 @@ import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.TransportMode;
 import org.matsim.api.core.v01.network.Link;
-import org.matsim.api.core.v01.population.*;
+import org.matsim.api.core.v01.population.Activity;
+import org.matsim.api.core.v01.population.Leg;
+import org.matsim.api.core.v01.population.Person;
+import org.matsim.api.core.v01.population.PlanElement;
 import org.matsim.core.config.Config;
-import org.matsim.core.controler.*;
 import org.matsim.core.population.routes.NetworkRoute;
 import org.matsim.core.router.DefaultRoutingModules;
 import org.matsim.core.router.MultimodalLinkChooser;
@@ -27,112 +30,82 @@ import org.matsim.core.router.speedy.SpeedyALTDataBridge;
 import org.matsim.core.router.util.LeastCostPathCalculator;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.utils.timing.TimeInterpretation;
-import org.matsim.facilities.*;
+import org.matsim.facilities.ActivityFacilitiesFactoryImpl;
+import org.matsim.facilities.ActivityFacility;
+import org.matsim.facilities.Facility;
 import org.matsim.utils.objectattributes.attributable.Attributes;
 import org.matsim.utils.objectattributes.attributable.AttributesImpl;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
-import java.io.*;
-import java.math.BigInteger;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.*;
 
 import static com.google.inject.name.Names.named;
 
 public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private static final Logger log = LogManager.getLogger(RoutingService.class);
+    private final int preplanningHorizon;
     private final ThreadLocal<RoutingModule> carRouter;
     private final Scenario scenario;
     private final TravelTimeSnapshot travelTime;
     private final Runnable shutdown;
     private final Config config;
     private final TravelDisutility travelDisutility;
-    private final Object landmarks; // Als Object speichern
-    private final AtomicLong lastLoggedHour = new AtomicLong(-1);
-    //WIP
-//    private final Map<String, Id<Link>> linkIdCache;
-//    private final Map<String, Person> personCache;
+    private final Object landmarks;
+    private final ExecutorService routingExecutor;
+    private final Set<Long> loggedHours = ConcurrentHashMap.newKeySet();
 
-    // === Routing request rate measurement (per sim-second, sliding window) ===
+    // Profiling
+    private final ConcurrentLinkedQueue<RoutingTimeProfilingEntry> routingTimeProfilingQueue = new ConcurrentLinkedQueue<>();
+    private final Thread routingLogWriterThread;
+    private volatile boolean routingTimeLoggingIsRunning = true;
+    private final String runContext;
 
-    private static final int ROUTING_RATE_WINDOW = 60; // last 60 sim-seconds
-    private final java.util.concurrent.atomic.LongAdder[] routingBuckets =
-            new java.util.concurrent.atomic.LongAdder[ROUTING_RATE_WINDOW];
-    private final java.util.concurrent.atomic.AtomicLong[] routingBucketSecond =
-            new java.util.concurrent.atomic.AtomicLong[ROUTING_RATE_WINDOW];
-    private final java.util.concurrent.atomic.LongAdder realCount = new java.util.concurrent.atomic.LongAdder();
-    private final java.util.concurrent.atomic.AtomicLong lastRealLogNs = new java.util.concurrent.atomic.AtomicLong(System.nanoTime());
-    private final java.util.concurrent.atomic.AtomicLong lastLoggedSimSecond = new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
-
-    private final ConcurrentLinkedQueue<ProfilingEntry> profilingQueue = new ConcurrentLinkedQueue<>();
-    private final Thread logWriterThread;
-    private volatile boolean isRunning = true;
-
-
-    public RoutingService(Scenario sharedScenario,
-                          Injector sharedAdhocInjector,
-                          Runnable shutdown,
-                          Config config,
-                          TravelTimeSnapshot sharedTravelTime,
-                          Object sharedLandmarks,
-                          TravelDisutility staticDisutility
-                          //Map<String, Id<Link>> linkIdCache, Map<String, Person> personCache WIP
-    ) {
+    public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, Config config, TravelTimeSnapshot sharedTravelTime, Object sharedLandmarks,
+                          TravelDisutility staticDisutility, ExecutorService routingExecutor, String runContext, int preplanningHorizon) {
         this.scenario = sharedScenario;
         this.shutdown = shutdown;
         this.config = config;
         this.travelTime = sharedTravelTime;
         this.travelDisutility = staticDisutility;
         this.landmarks = sharedLandmarks;
-        //WIP
-//        this.linkIdCache = linkIdCache;
-//        this.personCache = personCache;
+        this.routingExecutor = routingExecutor;
+        this.runContext = runContext;
+        this.preplanningHorizon = preplanningHorizon;
 
         this.carRouter = ThreadLocal.withInitial(() -> {
             // Create the FAST Router using shared memory landmarks
             // This is the core 'car' logic we pre-calculated
-            LeastCostPathCalculator speedyALTCarRouter = SpeedyALTDataBridge.createRouter(
-                    landmarks,
-                    travelTime,
-                    travelDisutility
-            );
+            LeastCostPathCalculator speedyALTCarRouter = SpeedyALTDataBridge.createRouter(landmarks, travelTime, travelDisutility);
 
             // Resolve lightweight helpers from the adhocInjector
             // Since 'walk' is teleported in our config, this is safe and fast
-            RoutingModule walkRouter = sharedAdhocInjector.getInstance(
-                    Key.get(RoutingModule.class, named(TransportMode.walk))
-            );
+            RoutingModule walkRouter = sharedAdhocInjector.getInstance(Key.get(RoutingModule.class, named(TransportMode.walk)));
 
             TimeInterpretation timeInterpretation = sharedAdhocInjector.getInstance(TimeInterpretation.class);
             MultimodalLinkChooser linkChooser = sharedAdhocInjector.getInstance(MultimodalLinkChooser.class);
 
             // Create the Access-Egress wrapper around the core 'car' router
-            return DefaultRoutingModules.createAccessEgressNetworkRouter(
-                    TransportMode.car,
-                    speedyALTCarRouter,
-                    scenario,
-                    scenario.getNetwork(),
-                    walkRouter,
-                    timeInterpretation,
-                    linkChooser
-            );
+            return DefaultRoutingModules.createAccessEgressNetworkRouter(TransportMode.car, speedyALTCarRouter, scenario, scenario.getNetwork(), walkRouter, timeInterpretation, linkChooser);
         });
-        this.logWriterThread = new Thread(this::continuousLoggingLoop);
-        this.logWriterThread.setName("Profiling-Writer");
-        this.logWriterThread.setDaemon(true); // Stirbt automatisch, wenn der Server stoppt
-        this.logWriterThread.start();
+        this.routingLogWriterThread = new Thread(this::continuousRoutingTimeLoggingLoop);
+        this.routingLogWriterThread.setName("routing-profiling-writer");
+        this.routingLogWriterThread.setDaemon(true); // Stirbt automatisch, wenn der Server stoppt
+        this.routingLogWriterThread.start();
+    }
 
-        for (int i = 0; i < ROUTING_RATE_WINDOW; i++) {
-            routingBuckets[i] = new java.util.concurrent.atomic.LongAdder();
-            routingBucketSecond[i] = new java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE);
-        }
-
+    private static long unixNanosNow() {
+        Instant now = Instant.now();
+        return now.getEpochSecond() * 1_000_000_000L + now.getNano();
     }
 
     public void warmUp() {
@@ -144,13 +117,14 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         log.info("Received shutdown request");
 
         // Signal an den Writer-Thread
-        isRunning = false;
+        routingTimeLoggingIsRunning = false;
 
         try {
             // Dem Writer kurz Zeit geben, die Queue zu leeren
-            logWriterThread.join(2000);
+            routingLogWriterThread.join(2000);
         } catch (InterruptedException e) {
-            log.warn("Shutdown interrupted while waiting for log writer");
+            log.warn("Shutdown interrupted while waiting for routing profiling writer");
+            Thread.currentThread().interrupt();
         }
 
         log.info("Shutting down routing service");
@@ -161,87 +135,104 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
     @Override
     public void getRoute(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
-        long startTime = System.nanoTime();
+        try {
+            routingExecutor.execute(() -> handleRouteRequest(request, responseObserver));
+        } catch (RejectedExecutionException e) {
+            log.warn("Routing executor overloaded; rejecting request {}", request.getRequestId());
+            responseObserver.onError(io.grpc.Status.RESOURCE_EXHAUSTED.withDescription("Routing executor overloaded. Try again later.").asException());
+        }
+    }
 
-        recordRoutingRate(request);
+    private void handleRouteRequest(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
+        long javaRequestReceived = unixNanosNow();
+        long javaStartNs = System.nanoTime();
+
+        ThreadPoolExecutor executor = (ThreadPoolExecutor) routingExecutor;
+        int queueSize = executor.getQueue().size();
+        int activeCount = executor.getActiveCount();
+        long taskCount = executor.getTaskCount();
+        long completedTaskCount = executor.getCompletedTaskCount();
 
         try {
+            long currentHour = request.getNow() / 3600;
+            if (loggedHours.add(currentHour)) {
+                log.info("Received route request for simulation hour {}:00", String.format("%02d", currentHour));
+            }
+
             // Deterministische Snapshot-Bindung:
             // blockiert, bis der für request.now benötigte one-bin-lag-Snapshot existiert
             // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
-            //log.info("Getting route");
-            travelTime.bindToTime(request.getNow());
+
+            long bindStart = System.nanoTime();
+            boolean hadToWait = travelTime.bindToTime(request.getNow());
+            long bindEnd = System.nanoTime();
+            long bindWaitNs = bindEnd - bindStart;
 
             assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
-//            log.debug(
-//                    "Routing request {} bound to snapshot {}, current snapshot is {}, with timestamp {}",
-//                    request.getRequestId(),
-//                    travelTime.getBoundSnapshotId(),
-//                    travelTime.getCurrentSnapshotId(),
-//                    travelTime.getBoundSnapshotTimestamp()
-//            );
-            long currentHour = request.getNow() / 3600;
-            if (lastLoggedHour.get() != currentHour) {
-                if (lastLoggedHour.getAndSet(currentHour) != currentHour) {
-                    log.info("Received route request for simulation hour {}:00", String.format("%02d", currentHour));
-                }
-            }
 
+            long createCarRouteRequestStart = System.nanoTime();
             RoutingRequest carRouteRequest = createCarRouteRequest(request);
+            long createCarRouteRequestEnd = System.nanoTime();
+            long createCarRouteRequestTime = createCarRouteRequestEnd - createCarRouteRequestStart;
 
+            long calcRouteStartRealtime = System.nanoTime();
             List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
-            Routing.Response response = convertToProtoResponse(planElements, request.getRequestId());
+            long calcRouteEndRealtime = System.nanoTime();
+            long calcRouteTime = calcRouteEndRealtime - calcRouteStartRealtime;
 
+            long createCarResponseStart = System.nanoTime();
+            long responseSentForRust = unixNanosNow();
+            Routing.Response response = convertToProtoResponse(planElements, responseSentForRust, request.getRequestId());
+            long createCarResponseEnd = System.nanoTime();
+            long createCarResponseTime = createCarResponseEnd - createCarResponseStart;
+
+            long responseSent = System.nanoTime();
             responseObserver.onNext(response);
             responseObserver.onCompleted();
 
-            long endTime = System.nanoTime();
-            int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
-            profilingQueue.add(new ProfilingEntry(
-                    (int) Thread.currentThread().threadId(),
-                    request.getNow(),
-                    request.getDepartureTime(),
-                    request.getFromLinkId(),
-                    request.getToLinkId(),
-                    startTime,
-                    endTime - startTime,
-                    travelTimes,
-                    request.getRequestId()
-            ));
+            long responseSentForRustReal = unixNanosNow();
+            long responseSentForRustDelta = responseSentForRustReal - responseSentForRust;
+            long javaTotalNs = System.nanoTime() - javaStartNs;
+            long rustGRPCSendStartedRealtime = request.getRustAdapterSentRequestGrpc();
+            long requestDeliveryLatencyNs = Math.max(0L, javaRequestReceived - rustGRPCSendStartedRealtime);
+
+            String requestIdStr = uuidBytesToString(request.getRequestId());
+
+            //int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
+            routingTimeProfilingQueue.add(new RoutingTimeProfilingEntry(requestIdStr, Thread.currentThread().getName(), request.getNow(), request.getDepartureTime(), request.getFromLinkId(), request.getToLinkId(), request.getRouteCallStartRealtime(), rustGRPCSendStartedRealtime, javaRequestReceived, bindWaitNs, hadToWait, createCarRouteRequestTime, calcRouteTime, createCarResponseTime, responseSentForRustReal, responseSentForRustDelta, requestDeliveryLatencyNs, javaTotalNs, queueSize, activeCount, taskCount, completedTaskCount));
 
         } catch (Exception e) {
             log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage(), e);
             // This is vital: Rust is waiting for this message!
-            responseObserver.onError(io.grpc.Status.INTERNAL
-                    .withDescription("Routing failed in Java: " + e.getMessage())
-                    .asException());
+            responseObserver.onError(Status.INTERNAL.withDescription("Routing failed in Java: " + e.getMessage()).asException());
         } finally {
             travelTime.unbind();
         }
     }
 
-    private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, ByteString requestId) {
+    private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, long responseSentForRust, ByteString requestId) {
         Routing.Response.Builder responseBuilder = Routing.Response.newBuilder();
+
+        boolean firstLeg = true;
 
         for (PlanElement element : planElements) {
             if (element instanceof Activity activity) {
                 responseBuilder.addActivities(convertToProtoActivity(activity));
             } else if (element instanceof Leg leg) {
-                responseBuilder.addLegs(convertToProtoLeg(leg));
+                responseBuilder.addLegs(convertToProtoLeg(leg, firstLeg));
+                firstLeg = false;
             } else {
                 throw new IllegalArgumentException("Unsupported PlanElement type: " + element.getClass().getName());
             }
         }
-
+        responseBuilder.setJavaRoutingServiceSentResponseGrpc(responseSentForRust);
         responseBuilder.setRequestId(requestId);
 
         return responseBuilder.build();
     }
 
-    private Routing.Leg convertToProtoLeg(Leg leg) {
-        Routing.Leg.Builder legBuilder = Routing.Leg.newBuilder()
-                .setMode(leg.getMode())
-                .setTravTime((int) leg.getTravelTime().orElseThrow(() -> new IllegalArgumentException("Leg must have travel time")));
+    private Routing.Leg convertToProtoLeg(Leg leg, boolean attachPreplanningHorizon) {
+        Routing.Leg.Builder legBuilder = Routing.Leg.newBuilder().setMode(leg.getMode()).setTravTime((int) leg.getTravelTime().orElseThrow(() -> new IllegalArgumentException("Leg must have travel time")));
         leg.getDepartureTime().ifDefined(d -> legBuilder.setDepTime((int) d));
         Optional.ofNullable(leg.getRoutingMode()).ifPresent(legBuilder::setRoutingMode);
 
@@ -261,10 +252,11 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             }
         }
 
-        Routing.GenericRoute.Builder protoGenericRoute = Routing.GenericRoute.newBuilder()
-                .setStartLink(leg.getRoute().getStartLinkId().toString())
-                .setEndLink(leg.getRoute().getEndLinkId().toString())
-                .setDistance(leg.getRoute().getDistance());
+//        if (attachPreplanningHorizon) {
+//            legBuilder.putAttributes("preplanningHorizon", Routing.AttributeValue.newBuilder().setIntValue(preplanningHorizon).build());
+//        }
+
+        Routing.GenericRoute.Builder protoGenericRoute = Routing.GenericRoute.newBuilder().setStartLink(leg.getRoute().getStartLinkId().toString()).setEndLink(leg.getRoute().getEndLinkId().toString()).setDistance(leg.getRoute().getDistance());
         leg.getRoute().getTravelTime().ifDefined(d -> protoGenericRoute.setTravTime((int) d));
 
         if (leg.getRoute() instanceof NetworkRoute networkRoute) {
@@ -293,10 +285,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
     private Routing.Activity convertToProtoActivity(Activity activity) {
         Routing.Activity.Builder builder = Routing.Activity.newBuilder();
-        builder.setActType(activity.getType())
-                .setLinkId(activity.getLinkId().toString())
-                .setX(activity.getCoord().getX())
-                .setY(activity.getCoord().getY());
+        builder.setActType(activity.getType()).setLinkId(activity.getLinkId().toString()).setX(activity.getCoord().getX()).setY(activity.getCoord().getY());
 
         activity.getStartTime().ifDefined(t -> builder.setStartTime((int) t));
         activity.getEndTime().ifDefined(t -> builder.setEndTime((int) t));
@@ -355,32 +344,24 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         };
     }
 
-    private void continuousLoggingLoop() {
+    private void continuousRoutingTimeLoggingLoop() {
         DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
         String t = LocalDateTime.now().format(dateTimeFormatter);
-        String outputFile = config.controller().getOutputDirectory() + "/routing-profiling-" + t + ".csv";
+        String outputFile = config.controller().getOutputDirectory()
+                + "/java-routing-time-profiling-"
+                + runContext
+                + "-"
+                + t
+                + ".csv";
 
-        log.info("Starting async profiling writer to: {}", outputFile);
+        log.info("Starting async java routing time profiling writer to: {}", outputFile);
 
-        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(outputFile));
-             CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder()
-                     .setHeader("thread", "now", "departure_time", "from", "to", "start", "duration_ns", "travel_time_s", "request_id")
-                     .get())) {
+        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(outputFile)); CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder().setHeader("requestId", "thread", "requestNow", "departure_time", "from", "to", "rustRouteCallStartRealtime", "rustGRPCRequestSendStartRealtime", "requestReceived", "bindWaitNs", "hadToWaitForSnapshot", "createCarRouteRequest", "calcRoute", "createCarResponse", "responseSent", "responseSentForRustDelta", "requestDeliveryRustToJavaLatency", "javaTotal", "queueSize", "activeCount", "taskCount", "completedTaskCount").get())) {
 
-            while (isRunning || !profilingQueue.isEmpty()) {
-                ProfilingEntry entry = profilingQueue.poll(); // Holt den nächsten Eintrag ohne zu blockieren
+            while (routingTimeLoggingIsRunning || !routingTimeProfilingQueue.isEmpty()) {
+                RoutingTimeProfilingEntry entry = routingTimeProfilingQueue.poll(); // Holt den nächsten Eintrag ohne zu blockieren
                 if (entry != null) {
-                    csv.printRecord(
-                            entry.thread(),
-                            entry.simulationNow(),
-                            entry.departureTime(),
-                            entry.from(),
-                            entry.to(),
-                            entry.start(),
-                            entry.duration(),
-                            entry.travelTime(),
-                            new BigInteger(1, entry.requestId().toByteArray()).toString()
-                    );
+                    csv.printRecord(entry.requestId(), entry.thread(), entry.routingRequestNow(), entry.departureTime(), entry.from(), entry.to(), entry.rustRouteCallStartRealtime(), entry.rustGRPCRequestSendStartRealtime(), entry.requestReceived(), entry.bindWaitNs(), entry.hadToWaitForSnapshot(), entry.createCarRouteRequest(), entry.calcRoute(), entry.createCarResponse(), entry.responseSent(), entry.responseSentForRustDelta(), entry.requestDeliveryRustToJavaLatency(), entry.javaTotal(), entry.queueSize(), entry.activeCount(), entry.taskCount(), entry.completedTaskCount());
                 } else {
                     Thread.sleep(100); // Kurz warten, wenn die Queue leer ist
                 }
@@ -388,52 +369,33 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             csv.flush();
         } catch (IOException | InterruptedException e) {
             log.error("Error in profiling writer thread", e);
+            Thread.currentThread().interrupt();
         }
     }
 
-    private record ProfilingEntry(int thread, int simulationNow, long departureTime, String from, String to,
-                                  long start, long duration, int travelTime, ByteString requestId) {
+    // Profiling von Routen 1.Zeit (...) 2.Inhalt (Request -> Response(Ergebnis)),
+    // Updates/Snapshots 1.Zeit(..., Snapshot erzeugen/publishen, Wartezeiten auf Snapshot(Wie viele, wie lange)) 2.Inhalt (Erzeugter Snapshot, TTC/LTT Veränderungen),
+    // Threading (QueueSize, Worker im Durchschnitt)  int gRPRQueueSize, int requestsInProgressCount, long taskCount, long completedTaskCount, long totalTaskCount
 
+    private record RoutingTimeProfilingEntry(String requestId, String thread, long routingRequestNow,
+                                             long departureTime, String from, String to,
+                                             long rustRouteCallStartRealtime, long rustGRPCRequestSendStartRealtime,
+                                             long requestReceived, long bindWaitNs, boolean hadToWaitForSnapshot,
+                                             long createCarRouteRequest, long calcRoute, long createCarResponse,
+                                             long responseSent, long responseSentForRustDelta,
+                                             long requestDeliveryRustToJavaLatency, long javaTotal, int queueSize,
+                                             int activeCount, long taskCount, long completedTaskCount) {
     }
 
-    private void recordRoutingRate(Routing.Request request) {
-        long simSecond = (long) request.getNow();
-        int idx = Math.floorMod(simSecond, ROUTING_RATE_WINDOW);
-        realCount.increment();
-        long nowNs = System.nanoTime();
-        long lastNs = lastRealLogNs.get();
-//        if (nowNs - lastNs > 1_000_000_000L && lastRealLogNs.compareAndSet(lastNs, nowNs)) {
-//            long c = realCount.sumThenReset();
-//            if (simSecond % 10 == 0 && lastLoggedSimSecond.getAndSet(simSecond) != simSecond) {
-//                log.info("Routing rate (real): ~{} req/s over last ~1s", c);
-//            }
-//        }
-        long prevSecond = routingBucketSecond[idx].get();
-        if (prevSecond != simSecond && routingBucketSecond[idx].compareAndSet(prevSecond, simSecond)) {
-            routingBuckets[idx].reset();
+    private static String uuidBytesToString(com.google.protobuf.ByteString bytes) {
+        byte[] arr = bytes.toByteArray();
+        if (arr.length != 16) {
+            throw new IllegalArgumentException("request_id must contain exactly 16 bytes for a UUID, but got " + arr.length);
         }
 
-        routingBuckets[idx].increment();
-
-        // Log nur gelegentlich (z.B. alle 10 Sim-Sekunden)
-        if (simSecond % 10 == 0) {
-            long sum = 0;
-            for (int i = 0; i < ROUTING_RATE_WINDOW; i++) {
-                long s = routingBucketSecond[i].get();
-                if (s >= simSecond - (ROUTING_RATE_WINDOW - 1)) {
-                    sum += routingBuckets[i].sum();
-                }
-            }
-            double avg = sum / (double) ROUTING_RATE_WINDOW;
-
-//            log.info(
-//                    "Routing rate: last {} sim-seconds avg = {} req/sim-s (current sim t={})",
-//                    ROUTING_RATE_WINDOW,
-//                    String.format("%.2f", avg),
-//                    simSecond
-//            );
-        }
+        ByteBuffer bb = ByteBuffer.wrap(arr);
+        long high = bb.getLong();
+        long low = bb.getLong();
+        return new UUID(high, low).toString();
     }
-
-
 }

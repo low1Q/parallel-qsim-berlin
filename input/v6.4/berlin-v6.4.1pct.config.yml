@@ -8,6 +8,7 @@ modules:
   partitioning:
     type: Partitioning
     num_parts: 8
+
     method: !Metis
       vertex_weight:
         - InLinkCount
@@ -26,7 +27,7 @@ modules:
   simulation:
     type: Simulation
     start_time: 0
-    end_time: 43200
+    end_time: 86400
     sample_size: 0.01
     stuck_threshold: 30
     main_modes:

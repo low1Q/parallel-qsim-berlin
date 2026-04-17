@@ -16,17 +16,17 @@ import java.util.Set;
 
 @CommandLine.Command(
         name = "prepare-population",
-        description = "Filters population by a given set of modes. Preserves all agents using only these modes. Attach preplanning horizon to pt legs.")
+        description = "Filters population by a given set of modes. Preserves all agents using only these modes. Attach preplanning horizon to car legs.")
 public class PreparePopulation implements MATSimAppCommand {
     public static final Logger log = LogManager.getLogger(PreparePopulation.class);
 
     @CommandLine.Option(names = "--input", description = "Path to population", required = true)
     private Path input;
 
-    @CommandLine.Option(names = "--modes", split = ",", description = "Positive set of modes that the population is allowed to use")
+    @CommandLine.Option(names = "--modes", split = ",", description = "Positive set of modes that the population is allowed to use", required = true)
     private Set<String> modes;
 
-    @CommandLine.Option(names = "--horizon", description = "Preplanning horizon to attach to pt legs (in seconds)", defaultValue = "600")
+    @CommandLine.Option(names = "--horizon", description = "Preplanning horizon to attach to car legs (in seconds)", defaultValue = "600")
     private int horizon;
 
     @Override
@@ -50,7 +50,7 @@ public class PreparePopulation implements MATSimAppCommand {
             CleanPopulation.removeUnselectedPlans(person);
             TripStructureUtils.getTrips(person.getSelectedPlan()).stream()
                     .filter(t -> TripStructureUtils.identifyMainMode(t.getTripElements()).equals("car"))
-                    .forEach(t -> t.getLegsOnly().getFirst().getAttributes().putAttribute("preplanningHorizon", 10 * 60));
+                    .forEach(t -> t.getLegsOnly().getFirst().getAttributes().putAttribute("preplanningHorizon", horizon));
         }
 
         log.info("Filtered population contains {} agents", inputPopulation.getPersons().size());

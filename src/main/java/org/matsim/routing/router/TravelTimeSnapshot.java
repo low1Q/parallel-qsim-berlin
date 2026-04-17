@@ -51,7 +51,7 @@ public class TravelTimeSnapshot implements TravelTime {
 
     // Default-Bin-Größe: 900 Sekunden = 15 Minuten (TravelTimeCalculator default)
     public static final long DEFAULT_WINDOW_SIZE_SECONDS = 900L;
-    public static final int BIN_LAG = 2;
+    public static final int BIN_LAG = 1;
 
     /**
      * Bin-Größe (z.B. 900s). Konfigurierbar über Konstruktor.

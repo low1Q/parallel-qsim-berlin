@@ -53,7 +53,6 @@ import static com.google.inject.name.Names.named;
 
 public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private static final Logger log = LogManager.getLogger(RoutingService.class);
-    private final int preplanningHorizon;
     private final ThreadLocal<RoutingModule> carRouter;
     private final Scenario scenario;
     private final TravelTimeSnapshot travelTime;
@@ -63,6 +62,9 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final Object landmarks;
     private final ExecutorService routingExecutor;
     private final Set<Long> loggedHours = ConcurrentHashMap.newKeySet();
+    private final int preplanningHorizon;
+
+    //private final ThreadLocal<RoutingModule> carRouterModule;
 
     // Profiling
     private final ConcurrentLinkedQueue<RoutingTimeProfilingEntry> routingTimeProfilingQueue = new ConcurrentLinkedQueue<>();
@@ -97,6 +99,15 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             // Create the Access-Egress wrapper around the core 'car' router
             return DefaultRoutingModules.createAccessEgressNetworkRouter(TransportMode.car, speedyALTCarRouter, scenario, scenario.getNetwork(), walkRouter, timeInterpretation, linkChooser);
         });
+
+
+
+
+        //this.carRouterModule = ThreadLocal.withInitial(() -> ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car"))));
+
+
+
+
         this.routingLogWriterThread = new Thread(this::continuousRoutingTimeLoggingLoop);
         this.routingLogWriterThread.setName("routing-profiling-writer");
         this.routingLogWriterThread.setDaemon(true); // Stirbt automatisch, wenn der Server stoppt
@@ -110,6 +121,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
     public void warmUp() {
         carRouter.get();
+        //carRouterModule.get();
     }
 
     @Override
@@ -163,8 +175,14 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             // blockiert, bis der für request.now benötigte one-bin-lag-Snapshot existiert
             // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
 
+            int requestNow = request.getNow();
+            if (request.getDepartureTime() - requestNow < preplanningHorizon) {
+                requestNow = request.getDepartureTime() -  preplanningHorizon;
+                //log.warn("Request {} has departure time {} and requestNow {}. A difference of {}. New requestNow {}. This is within the preplanning horizon of {} seconds.", uuidBytesToString(request.getRequestId()), request.getDepartureTime(), request.getNow(),request.getDepartureTime()-request.getNow(), requestNow, preplanningHorizon);
+            }
+
             long bindStart = System.nanoTime();
-            boolean hadToWait = travelTime.bindToTime(request.getNow());
+            boolean hadToWait = travelTime.bindToTime(requestNow);
             long bindEnd = System.nanoTime();
             long bindWaitNs = bindEnd - bindStart;
 
@@ -177,6 +195,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
             long calcRouteStartRealtime = System.nanoTime();
             List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
+            //List<? extends PlanElement> planElements = carRouterModule.get().calcRoute(carRouteRequest);
             long calcRouteEndRealtime = System.nanoTime();
             long calcRouteTime = calcRouteEndRealtime - calcRouteStartRealtime;
 

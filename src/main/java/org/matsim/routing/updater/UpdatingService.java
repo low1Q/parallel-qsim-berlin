@@ -35,7 +35,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
 
 public class UpdatingService extends EventSharingServiceGrpc.EventSharingServiceImplBase {
     private static final Logger log = LogManager.getLogger(UpdatingService.class);
@@ -48,6 +47,8 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
     private final double[] internalTravelTimes;         // Das Arbeits-Array
     private final Set<String> pendingAffectedLinkIds = new HashSet<>();
+    private int processedLinkEnterEvents = 0;
+    private int processedLinkLeavesEvents = 0;
 
     //Profiling
     private final ConcurrentLinkedQueue<UpdatingProfilingEntry> updatingProfilingQueue = new ConcurrentLinkedQueue<>();
@@ -126,6 +127,9 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             updaterExecutor.execute(() -> {
                 long batchReceivedNs = unixNanosNow();
                 long totalStartNs = System.nanoTime();
+                //int index = 0;
+                //String[] test = new String[batchRequest.getRequestsCount()];
+
                 try {
                     long batchSentAtNs = batchRequest.getGrpcBatchSentAtRealtime();
                     long batchDeliveryRustToJavaLatencyNs =
@@ -146,10 +150,13 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
                             pendingAffectedLinkIds.add(request.getLinkId());
                         }
                         processEvent(request);
+//                        test[index] = request.getEventType();
+//                        index++;
                         long eventDetectedAtRust = request.getEventDetectedAtRealtime();
                         long eventFromDetectedToProcessed = unixNanosNow() - eventDetectedAtRust;
                         eventsLifespanSum += eventFromDetectedToProcessed;
                     }
+                    //log.info(Arrays.toString(test));
                     eventCount = eventCount + batchRequest.getRequestsCount();
                     float avgEventLifespan = requestsCount > 0 ? eventsLifespanSum / (float) requestsCount : 0f;
 
@@ -171,7 +178,11 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
                         }
 
                         long publishStartNs = System.nanoTime();
+//                        int ignoredEvents = processedLinkEnterEvents - processedLinkLeavesEvents;
+//                        log.info("{} Ignored Events for this Batch. ProcessedLinkEnterEvents: {}, ProcessedLinkLeaveEvents: {}", ignoredEvents, processedLinkEnterEvents , processedLinkLeavesEvents);
                         snapshotId = publishNewSnapshot(publishTimeNow, pendingAffectedLinkIds);
+//                        processedLinkEnterEvents = 0;
+//                        processedLinkLeavesEvents = 0;
                         long publishEndNs = System.nanoTime();
                         publishDurationNs = publishEndNs - publishStartNs;
                         pendingAffectedLinkIds.clear();
@@ -222,17 +233,19 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         if (request.getEventType().equals("entered link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
             LinkEnterEvent linkEnterEvent = new LinkEnterEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
             eventsManager.processEvent(linkEnterEvent);
+            //processedLinkEnterEvents++;
         } else if (request.getEventType().equals("left link") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
             LinkLeaveEvent linkLeaveEvent = new LinkLeaveEvent(request.getNow(), Id.createVehicleId(request.getVehicleId()), Id.createLinkId(request.getLinkId()));
             eventsManager.processEvent(linkLeaveEvent);
-        } else if (request.getEventType().equals("vehicle enters traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-            VehicleEntersTrafficEvent vehicleEntersTrafficEvent = new VehicleEntersTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
-                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
-            eventsManager.processEvent(vehicleEntersTrafficEvent);
-        } else if (request.getEventType().equals("vehicle leaves traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
-            VehicleLeavesTrafficEvent vehicleLeavesTrafficEvent = new VehicleLeavesTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
-                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
-            eventsManager.processEvent(vehicleLeavesTrafficEvent);
+            //processedLinkLeavesEvents++;
+//        } else if (request.getEventType().equals("vehicle enters traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//            VehicleEntersTrafficEvent vehicleEntersTrafficEvent = new VehicleEntersTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
+//                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
+//            eventsManager.processEvent(vehicleEntersTrafficEvent);
+//        } else if (request.getEventType().equals("vehicle leaves traffic") && !request.getLinkId().isEmpty() && !request.getVehicleId().isEmpty()) {
+//            VehicleLeavesTrafficEvent vehicleLeavesTrafficEvent = new VehicleLeavesTrafficEvent(request.getNow(), Id.createPersonId(request.getDriverId()),
+//                    Id.createLinkId(request.getLinkId()), Id.createVehicleId(request.getVehicleId()), request.getNetworkMode(), request.getRelativePositionOnLink());
+//            eventsManager.processEvent(vehicleLeavesTrafficEvent);
         } else {
             log.warn("Error with Event: LinkType: {}, LinkId: {}, VehicleId: {}!", request.getEventType(), request.getLinkId(), request.getVehicleId());
         }

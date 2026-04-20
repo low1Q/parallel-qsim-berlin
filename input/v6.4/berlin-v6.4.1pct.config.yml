@@ -27,7 +27,7 @@ modules:
   simulation:
     type: Simulation
     start_time: 0
-    end_time: 86400
+    end_time: 86400 #86400
     sample_size: 0.01
     stuck_threshold: 30
     main_modes:

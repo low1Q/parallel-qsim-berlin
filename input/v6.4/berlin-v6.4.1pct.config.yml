@@ -17,10 +17,10 @@ modules:
   output:
     type: Output
     output_dir: output/v6.4/1pct
-    write_events: Proto
-    logging: Info
-    profiling: !CSV
-      level: TRACE
+    write_events: None # Proto
+    logging: None # Info
+    profiling: None # !CSV
+      # level: TRACE
   routing:
     type: Routing
     mode: UsePlans

@@ -195,7 +195,9 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
                     Thread.currentThread().interrupt();
                 }
             }
-
+            if (sharedTravelTime.getWaitingSnapshotFailedCount() > 0) {
+                log.warn("Deterministic run compromised! Had to fall back on earlier Snapshot caused by deadlock for {} times.", sharedTravelTime.getWaitingSnapshotFailedCount());
+            }
             log.info("Cleanup: Shutting down pools...");
 
             // Pools stoppen (Graceful Shutdown)

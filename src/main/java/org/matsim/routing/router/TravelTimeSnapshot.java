@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -40,40 +41,27 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class TravelTimeSnapshot implements TravelTime {
 
-    /**
-     * Interner Snapshot: immutable Container.
-     * times[] wird nach Veröffentlichung niemals mehr verändert.
-     */
-    private record Snapshot(double[] times, long id, double timestamp) {
-    }
-
-    private static final Logger log = LogManager.getLogger(TravelTimeSnapshot.class);
-
     // Default-Bin-Größe: 900 Sekunden = 15 Minuten (TravelTimeCalculator default)
     public static final long DEFAULT_WINDOW_SIZE_SECONDS = 900L;
     public static final int BIN_LAG = 1;
-
+    private static final Logger log = LogManager.getLogger(TravelTimeSnapshot.class);
     /**
      * Bin-Größe (z.B. 900s). Konfigurierbar über Konstruktor.
      */
     private final long windowSizeSeconds;
-
     /**
      * Aktueller Snapshot (atomar ausgetauscht).
      * Routing ohne Binding würde bei jedem Call currentSnapshot.get() lesen (→ kann wechseln).
      */
     private final AtomicReference<Snapshot> currentSnapshot;
-
     /**
      * Sequenzgenerator für Snapshot-IDs (monoton steigend).
      */
     private final AtomicLong snapshotSeq = new AtomicLong(0);
-
     /**
      * Map LinkId -> ArrayIndex (einmalig aufgebaut).
      */
     private final Map<Id<Link>, Integer> linkIdToIndex;
-
     /**
      * Zeitindizierte History: BinStart (Sekunden) -> Snapshot.
      * <p>
@@ -88,38 +76,34 @@ public class TravelTimeSnapshot implements TravelTime {
      */
     private final ConcurrentNavigableMap<Long, Snapshot> snapshotsByBinStart =
             new ConcurrentSkipListMap<>();
-
     /**
      * Per Thread gebundene Snapshot-Sicht (für konsistentes Routing).
      * Wenn gesetzt, liest getLinkTravelTime(...) immer aus diesem Array.
      */
     private final ThreadLocal<double[]> boundTimes = new ThreadLocal<>();
-
     /**
      * Per Thread gebundene Snapshot-ID (für Debug/Verifikation).
      */
     private final ThreadLocal<Long> boundSnapshotId = new ThreadLocal<>();
-
     /**
      * Per Thread gebundener Snapshot-Timestamp (für Debug/Verifikation).
      */
     private final ThreadLocal<Double> boundSnapshotTimestamp = new ThreadLocal<>();
-
     /**
      * Monitor für blockierendes Warten, bis ein deterministisch benötigter Snapshot publiziert wurde.
      */
     private final Object snapshotMonitor = new Object();
-
     /**
      * Optional: gemessene Gesamt-Wartezeit aller Routing-Threads in Nanosekunden.
      * Nützlich für die Evaluation.
      */
     private final AtomicLong totalWaitTimeNanos = new AtomicLong(0L);
-
     /**
      * Optional: Anzahl der Wait-Vorgänge.
      */
     private final AtomicLong totalWaitCount = new AtomicLong(0L);
+
+    private final AtomicInteger waitForSnapshotFailedCount = new AtomicInteger(0);
 
     /**
      * Default-Konstruktor: windowSizeSeconds = 900s.
@@ -253,12 +237,20 @@ public class TravelTimeSnapshot implements TravelTime {
         Snapshot snap;
         boolean hadToWait = false;
         synchronized (snapshotMonitor) {
+            long waitStartNanos = System.nanoTime();
             while ((snap = snapshotsByBinStart.get(targetBin)) == null) {
                 hadToWait = true;
+                long waitedNanos = System.nanoTime() - waitStartNanos;
+                long waitedMillis = waitedNanos / 1_000_000L;
+                if (waitedMillis > 5_000L) {
+                    waitForSnapshotFailedCount.incrementAndGet();
+                    targetBin = currentBin - (BIN_LAG + 1) * windowSizeSeconds;
+                    waitStartNanos = System.nanoTime();
+                }
 //                log.info("Routingrequest für now: {} und departureTime: {} aus Thread {} wartet auf Time-Bin {}", timeSeconds, request.getDepartureTime(),threadName, targetBin);
 //                log.info("Queue stats: size: {}, activeThreads: {}, completedTasks: {}, totalTasks: {}", size, activeCount, completedTaskCount, taskCount);
                 try {
-                    snapshotMonitor.wait();
+                    snapshotMonitor.wait(200);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new RuntimeException(
@@ -354,7 +346,14 @@ public class TravelTimeSnapshot implements TravelTime {
         return totalWaitTimeNanos.get();
     }
 
-    public long getTotalWaitCount() {
-        return totalWaitCount.get();
+    public int getWaitingSnapshotFailedCount() {
+        return waitForSnapshotFailedCount.get();
+    }
+
+    /**
+     * Interner Snapshot: immutable Container.
+     * times[] wird nach Veröffentlichung niemals mehr verändert.
+     */
+    private record Snapshot(double[] times, long id, double timestamp) {
     }
 }

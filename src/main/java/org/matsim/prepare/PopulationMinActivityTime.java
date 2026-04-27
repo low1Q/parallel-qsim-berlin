@@ -25,9 +25,11 @@ public class PopulationMinActivityTime implements MATSimAppCommand {
     private int minDuration = 300;
 
     public static void main(String[] args) {
-        new PopulationMinActivityTime().execute(new String[]{
-                "--input", "/Users/paulh/public-svn/matsim/scenarios/countries/de/berlin/berlin-v6.4/input/berlin-v6.4-1pct.plans.xml.gz", "--output", "output"
-        });
+        new PopulationMinActivityTime().execute(args
+//                new String[]{
+//                "--input", "/Users/paulh/public-svn/matsim/scenarios/countries/de/berlin/berlin-v6.4/input/berlin-v6.4-1pct.plans.xml.gz", "--output", "output"
+//        }
+        );
     }
 
     @Override

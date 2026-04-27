@@ -9,16 +9,16 @@ PCT := 1
 
 MODE ?= cargo
 
-HORIZON := 600
+HORIZON ?= 600
 
 java_prepare := java -Xmx$(MEMORY) \
     --add-opens java.base/java.lang=ALL-UNNAMED \
     --add-opens java.base/java.util=ALL-UNNAMED \
     -Dguice.disable.misplaced.annotation.check=true \
-    -XX:+UseZGC -cp $(JAR) org.matsim.prepare.RunParallelQSimBerlinPreparation
+    -XX:+UseG1GC -cp $(JAR) org.matsim.prepare.RunParallelQSimBerlinPreparation
 
 # prefer local DTDs to avoid network access (i.e. on hpc clusters)
-java_router := java -Xmx$(MEMORY) -XX:+UseZGC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.routing.router.RouterWithUpdatesServer
+java_router := java -Xmx$(MEMORY) -XX:+UseG1GC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.routing.router.RouterWithUpdatesServer
 
 p := ./input/$(BV)
 op := ./output/$(BV)/$(PCT)pct
@@ -61,7 +61,7 @@ $(op)/berlin-$(BV)-$(PCT)pct.plans.xml.gz:
 $(op)/berlin-$(BV)-vehicleTypes.xml:
 	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/$(notdir $@) -o $@
 
-$(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml: $(op)/berlin-$(BV)-vehicleTypes.xml $(JAR)
+$(op)/berlin-$(BV)-vehicleTypes-including-walk.xml: $(op)/berlin-$(BV)-vehicleTypes.xml $(JAR)
 	$(java_prepare) prepare adapt-vehicle-types\
 		--input $<
 
@@ -86,7 +86,7 @@ $(op)/berlin-$(BV).counts-vmz.xml.gz:
 
 # ===== CONVERT TO BINARY PROTOBUF =====
 
-$(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml $(op)/berlin-$(BV)-network.xml.gz
+$(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk.xml $(op)/berlin-$(BV)-network.xml.gz
 	if [ "$(MODE)" = "bin" ]; then \
 		RUNNER="$(RUST_BASE)/target/release/convert_to_binary"; \
 	else \
@@ -95,7 +95,7 @@ $(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$
 	eval "$$RUNNER \
 		--network $(op)/berlin-$(BV)-network.xml.gz\
 		--population $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz\
-		--vehicles $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml\
+		--vehicles $(op)/berlin-$(BV)-vehicleTypes-including-walk.xml\
 		--output-dir $(op)\
 		--run-id binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct"
 
@@ -138,13 +138,26 @@ run-routing: prepare
 		--preplanning-horizon $(HORIZON) \
 		--event-sharing-bin-size-secs 900 \
 		--event-sharing-closed-bin-batch-size 10000 \
+		--num-routing-threads 4 \
 		--enable-performance-logging \
 		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
 		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
 		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
 		--set protofiles.population=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+#				--set protofiles.network=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+#        		--set protofiles.ids=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+#        		--set protofiles.vehicles=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+#        		--set protofiles.population=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
 
-# ===== POST_PROCESSING =====		--disable-all-measurements \				--only-route-blocking-wait \		--enable-performance-logging \
+
+
+
+#		--set protofiles.network=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+#		--set protofiles.ids=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+#		--set protofiles.vehicles=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+#		--set protofiles.population=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+
+# ===== POST_PROCESSING =====		--set computational_setup.global_sync=true \		--disable-all-measurements \				--only-route-blocking-wait \		--enable-performance-logging \		--set computational_setup.adapter_worker_threads=4 \
 
 convert-events:
 	if [ "$(MODE)" = "bin" ]; then \

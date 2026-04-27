@@ -112,11 +112,6 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
                     if (batchRequest.getPublishSnapshot()) {
                         publishTimeNow = Math.nextDown(batchRequest.getCompletedBinEnd());
 
-                        if (batchRequest.getEmptyBin()) {
-                            log.warn("Publishing empty snapshot for bin [{}, {})",
-                                    batchRequest.getCompletedBinStart(),
-                                    batchRequest.getCompletedBinEnd());
-                        }
                         publishNewSnapshot(publishTimeNow, pendingAffectedLinkIds);
                         pendingAffectedLinkIds.clear();
                     }

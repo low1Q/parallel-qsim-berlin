@@ -132,6 +132,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             Routing.Response response = convertToProtoResponse(planElements, request.getRequestId());
 
             responseObserver.onNext(response);
+            responseObserver.onCompleted();
 
 
         } catch (Exception e) {

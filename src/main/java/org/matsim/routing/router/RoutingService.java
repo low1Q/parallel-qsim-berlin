@@ -6,8 +6,6 @@ import com.google.protobuf.ByteString;
 import com.google.protobuf.Empty;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVPrinter;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
@@ -38,14 +36,7 @@ import org.matsim.utils.objectattributes.attributable.AttributesImpl;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
-import java.io.BufferedWriter;
-import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -57,29 +48,17 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final Scenario scenario;
     private final TravelTimeSnapshot travelTime;
     private final Runnable shutdown;
-    private final Config config;
     private final TravelDisutility travelDisutility;
     private final ExecutorService routingExecutor;
-    private final Set<Long> loggedHours = ConcurrentHashMap.newKeySet();
     private final int preplanningHorizon;
 
-    //private final ThreadLocal<RoutingModule> carRouterModule;
-
-    // Profiling
-    private final ConcurrentLinkedQueue<RoutingTimeProfilingEntry> routingTimeProfilingQueue = new ConcurrentLinkedQueue<>();
-    private final Thread routingLogWriterThread;
-    private volatile boolean routingTimeLoggingIsRunning = true;
-    private final String runContext;
-
-    public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, Config config, TravelTimeSnapshot sharedTravelTime, SpeedyALTFactory speedyALTFactory,
-                          TravelDisutility staticDisutility, ExecutorService routingExecutor, String runContext, int preplanningHorizon) {
+    public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, TravelTimeSnapshot sharedTravelTime, SpeedyALTFactory speedyALTFactory,
+                          TravelDisutility staticDisutility, ExecutorService routingExecutor, int preplanningHorizon) {
         this.scenario = sharedScenario;
         this.shutdown = shutdown;
-        this.config = config;
         this.travelTime = sharedTravelTime;
         this.travelDisutility = staticDisutility;
         this.routingExecutor = routingExecutor;
-        this.runContext = runContext;
         this.preplanningHorizon = preplanningHorizon;
 
         this.carRouter = ThreadLocal.withInitial(() -> {
@@ -102,43 +81,16 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             // Create the Access-Egress wrapper around the core 'car' router
             return DefaultRoutingModules.createAccessEgressNetworkRouter(TransportMode.car, speedyALTCarRouter, scenario, scenario.getNetwork(), walkRouter, timeInterpretation, linkChooser);
         });
-
-
-
-        //this.carRouterModule = ThreadLocal.withInitial(() -> ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car"))));
-
-
-
-
-
-        this.routingLogWriterThread = new Thread(this::continuousRoutingTimeLoggingLoop);
-        this.routingLogWriterThread.setName("routing-profiling-writer");
-        this.routingLogWriterThread.setDaemon(true); // Stirbt automatisch, wenn der Server stoppt
-        this.routingLogWriterThread.start();
-    }
-
-    private static long unixNanosNow() {
-        Instant now = Instant.now();
-        return now.getEpochSecond() * 1_000_000_000L + now.getNano();
     }
 
     public void warmUp() {
         carRouter.get();
-        //carRouterModule.get();
     }
 
     @Override
     public void shutdown(Empty request, StreamObserver<Empty> responseObserver) {
         log.info("Received shutdown request");
-        // Signal an den Writer-Thread
-        routingTimeLoggingIsRunning = false;
-        try {
-            // Dem Writer kurz Zeit geben, die Queue zu leeren
-            routingLogWriterThread.join(5_000);
-        } catch (InterruptedException e) {
-            log.warn("Shutdown interrupted while waiting for routing profiling writer");
-            Thread.currentThread().interrupt();
-        }
+
         log.info("Shutting down routing service");
         responseObserver.onNext(Empty.getDefaultInstance());
         responseObserver.onCompleted();
@@ -156,20 +108,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     }
 
     private void handleRouteRequest(Routing.Request request, StreamObserver<Routing.Response> responseObserver) {
-        long javaRequestReceived = unixNanosNow();
-        long javaStartNs = System.nanoTime();
-
-        ThreadPoolExecutor executor = (ThreadPoolExecutor) routingExecutor;
-        int queueSize = executor.getQueue().size();
-        int activeCount = executor.getActiveCount();
-        long taskCount = executor.getTaskCount();
-        long completedTaskCount = executor.getCompletedTaskCount();
-
         try {
-            long currentHour = request.getNow() / 3600;
-            if (loggedHours.add(currentHour)) {
-                log.info("Received route request for simulation hour {}:00", String.format("%02d", currentHour));
-            }
 
             // Deterministische Snapshot-Bindung:
             // blockiert, bis der für request.now benötigte one-bin-lag-Snapshot existiert
@@ -181,44 +120,19 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 //log.warn("Request {} has departure time {} and requestNow {}. A difference of {}. New requestNow {}. This is within the preplanning horizon of {} seconds.", uuidBytesToString(request.getRequestId()), request.getDepartureTime(), request.getNow(),request.getDepartureTime()-request.getNow(), requestNow, preplanningHorizon);
             }
 
-            long bindStart = System.nanoTime();
-            boolean hadToWait = travelTime.bindToTime(requestNow);
-            long bindEnd = System.nanoTime();
-            long bindWaitNs = bindEnd - bindStart;
+            travelTime.bindToTime(requestNow);
 
             assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
 
-            long createCarRouteRequestStart = System.nanoTime();
             RoutingRequest carRouteRequest = createCarRouteRequest(request);
-            long createCarRouteRequestEnd = System.nanoTime();
-            long createCarRouteRequestTime = createCarRouteRequestEnd - createCarRouteRequestStart;
 
-            long calcRouteStartRealtime = System.nanoTime();
             List<? extends PlanElement> planElements = carRouter.get().calcRoute(carRouteRequest);
-            //List<? extends PlanElement> planElements = carRouterModule.get().calcRoute(carRouteRequest);
-            long calcRouteEndRealtime = System.nanoTime();
-            long calcRouteTime = calcRouteEndRealtime - calcRouteStartRealtime;
 
-            long createCarResponseStart = System.nanoTime();
-            long responseSentForRust = unixNanosNow();
-            Routing.Response response = convertToProtoResponse(planElements, responseSentForRust, request.getRequestId());
-            long createCarResponseEnd = System.nanoTime();
-            long createCarResponseTime = createCarResponseEnd - createCarResponseStart;
 
-            long responseSent = System.nanoTime();
+            Routing.Response response = convertToProtoResponse(planElements, request.getRequestId());
+
             responseObserver.onNext(response);
-            responseObserver.onCompleted();
 
-            long responseSentForRustReal = unixNanosNow();
-            long responseSentForRustDelta = responseSentForRustReal - responseSentForRust;
-            long javaTotalNs = System.nanoTime() - javaStartNs;
-            long rustGRPCSendStartedRealtime = request.getRustAdapterSentRequestGrpc();
-            long requestDeliveryLatencyNs = Math.max(0L, javaRequestReceived - rustGRPCSendStartedRealtime);
-
-            String requestIdStr = uuidBytesToString(request.getRequestId());
-
-            //int travelTimes = response.getLegsList().stream().mapToInt(Routing.Leg::getTravTime).sum();
-            routingTimeProfilingQueue.add(new RoutingTimeProfilingEntry(requestIdStr, Thread.currentThread().getName(), request.getNow(), request.getDepartureTime(), request.getFromLinkId(), request.getToLinkId(), request.getRouteCallStartRealtime(), rustGRPCSendStartedRealtime, javaRequestReceived, bindWaitNs, hadToWait, createCarRouteRequestTime, calcRouteTime, createCarResponseTime, responseSentForRustReal, responseSentForRustDelta, requestDeliveryLatencyNs, javaTotalNs, queueSize, activeCount, taskCount, completedTaskCount));
 
         } catch (Exception e) {
             log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage(), e);
@@ -229,7 +143,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         }
     }
 
-    private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, long responseSentForRust, ByteString requestId) {
+    private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, ByteString requestId) {
         Routing.Response.Builder responseBuilder = Routing.Response.newBuilder();
 
         for (PlanElement element : planElements) {
@@ -241,7 +155,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 throw new IllegalArgumentException("Unsupported PlanElement type: " + element.getClass().getName());
             }
         }
-        responseBuilder.setJavaRoutingServiceSentResponseGrpc(responseSentForRust);
         responseBuilder.setRequestId(requestId);
 
         return responseBuilder.build();
@@ -359,50 +272,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             }
         };
     }
-
-    private void continuousRoutingTimeLoggingLoop() {
-        DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
-        String t = LocalDateTime.now().format(dateTimeFormatter);
-        String outputFile = config.controller().getOutputDirectory()
-                + "/java-routing-time-profiling-"
-                + runContext
-                + "-"
-                + t
-                + ".csv";
-
-        log.info("Starting async java routing time profiling writer to: {}", outputFile);
-
-        try (BufferedWriter writer = Files.newBufferedWriter(Paths.get(outputFile)); CSVPrinter csv = new CSVPrinter(writer, CSVFormat.DEFAULT.builder().setHeader("requestId", "thread", "requestNow", "departure_time", "from", "to", "rustRouteCallStartRealtime", "rustGRPCRequestSendStartRealtime", "requestReceived", "bindWaitNs", "hadToWaitForSnapshot", "createCarRouteRequest", "calcRoute", "createCarResponse", "responseSent", "responseSentForRustDelta", "requestDeliveryRustToJavaLatency", "javaTotal", "queueSize", "activeCount", "taskCount", "completedTaskCount").get())) {
-
-            while (routingTimeLoggingIsRunning || !routingTimeProfilingQueue.isEmpty()) {
-                RoutingTimeProfilingEntry entry = routingTimeProfilingQueue.poll(); // Holt den nächsten Eintrag ohne zu blockieren
-                if (entry != null) {
-                    csv.printRecord(entry.requestId(), entry.thread(), entry.routingRequestNow(), entry.departureTime(), entry.from(), entry.to(), entry.rustRouteCallStartRealtime(), entry.rustGRPCRequestSendStartRealtime(), entry.requestReceived(), entry.bindWaitNs(), entry.hadToWaitForSnapshot(), entry.createCarRouteRequest(), entry.calcRoute(), entry.createCarResponse(), entry.responseSent(), entry.responseSentForRustDelta(), entry.requestDeliveryRustToJavaLatency(), entry.javaTotal(), entry.queueSize(), entry.activeCount(), entry.taskCount(), entry.completedTaskCount());
-                } else {
-                    Thread.sleep(100); // Kurz warten, wenn die Queue leer ist
-                }
-            }
-            csv.flush();
-        } catch (IOException | InterruptedException e) {
-            log.error("Error in profiling writer thread", e);
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    // Profiling von Routen 1.Zeit (...) 2.Inhalt (Request -> Response(Ergebnis)),
-    // Updates/Snapshots 1.Zeit(..., Snapshot erzeugen/publishen, Wartezeiten auf Snapshot(Wie viele, wie lange)) 2.Inhalt (Erzeugter Snapshot, TTC/LTT Veränderungen),
-    // Threading (QueueSize, Worker im Durchschnitt)  int gRPRQueueSize, int requestsInProgressCount, long taskCount, long completedTaskCount, long totalTaskCount
-
-    private record RoutingTimeProfilingEntry(String requestId, String thread, long routingRequestNow,
-                                             long departureTime, String from, String to,
-                                             long rustRouteCallStartRealtime, long rustGRPCRequestSendStartRealtime,
-                                             long requestReceived, long bindWaitNs, boolean hadToWaitForSnapshot,
-                                             long createCarRouteRequest, long calcRoute, long createCarResponse,
-                                             long responseSent, long responseSentForRustDelta,
-                                             long requestDeliveryRustToJavaLatency, long javaTotal, int queueSize,
-                                             int activeCount, long taskCount, long completedTaskCount) {
-    }
-
     private static String uuidBytesToString(com.google.protobuf.ByteString bytes) {
         byte[] arr = bytes.toByteArray();
         if (arr.length != 16) {

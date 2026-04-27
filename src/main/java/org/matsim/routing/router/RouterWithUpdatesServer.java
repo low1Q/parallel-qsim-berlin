@@ -75,13 +75,6 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         new RouterWithUpdatesServer().execute(args);
     }
 
-    private static String sanitizeForFilename(String s) {
-        if (s == null || s.isBlank()) {
-            return "";
-        }
-        return s.trim().replaceAll("[^a-zA-Z0-9._-]+", "_");
-    }
-
     @Override
     public Integer call() throws Exception {
         log.info("Starting combined server with sample: {}, config: {}, output: {}, routingThreads: {}", sample, configPath, output, numRoutingThreads);
@@ -189,14 +182,11 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
             log.info("Cleanup: All resources released.");
         };
-
-        String runContext = buildRunContextString();
-        log.info("Java profiling run context: {}", runContext);
         // setze reale shutdown hooks in Services (optional)
         UpdatingService updatingService = new UpdatingService(sharedScenario, sharedAdhocInjector,
-                serverShutdown, updaterExecutor, sharedTravelTime, runContext);
+                serverShutdown, updaterExecutor, sharedTravelTime);
         RoutingService routingService = new RoutingService(sharedScenario, sharedAdhocInjector,
-                serverShutdown, config, sharedTravelTime, sharedSpeedyALTFactory, sharedDisutility, routingExecutor, runContext, preplanningHorizon);
+                serverShutdown, sharedTravelTime, sharedSpeedyALTFactory, sharedDisutility, routingExecutor, preplanningHorizon);
 
         // Eager Warmup (Direkt auf dem rpcExecutor)
         log.info("Starting Eager Warmup on {} threads...", numThreads);
@@ -270,20 +260,4 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             scenario.getVehicles().addVehicle(vehicle);
         }
     }
-
-    private String buildRunContextString() {
-        String custom = sanitizeForFilename(addContextAsString);
-
-        String base = String.format(
-                "bin%d-threads%d-PH%d-batch%d-parts%d",
-                binSize,
-                numRoutingThreads,
-                preplanningHorizon,
-                batchSize,
-                partitionCount
-        );
-
-        return custom.isEmpty() ? base : base + "-" + custom;
-    }
-
 }

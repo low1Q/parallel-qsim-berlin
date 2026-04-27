@@ -329,8 +329,6 @@ public class TravelTimeSnapshot implements TravelTime {
     public double getLinkTravelTime(Link link, double time, Person person, Vehicle vehicle) {
         double[] times = boundTimes.get();
         if (times == null) {
-            // Fallback: wenn jemand vergisst zu binden, nehmen wir den aktuellsten Snapshot
-            // times = currentSnapshot.get().times;
             throw new IllegalStateException(
                     "TravelTimeSnapshot accessed without thread binding. " +
                             "RoutingService must call bindToTime(...) before routing.");

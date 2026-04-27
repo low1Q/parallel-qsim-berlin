@@ -6,11 +6,10 @@ import org.matsim.vehicles.*;
 import picocli.CommandLine;
 
 import java.nio.file.Path;
-import java.util.Set;
 
 @CommandLine.Command(
         name = "adapt-vehicle-types",
-        description = "Adds a walk and pt vehicle type to the vehicle types file."
+        description = "Adds a walk vehicle type to the vehicle types file."
 )
 public class AdaptVehicleTypes implements MATSimAppCommand {
     @CommandLine.Option(names = "--input", description = "Path to the input vehicle types file", required = true)
@@ -29,12 +28,8 @@ public class AdaptVehicleTypes implements MATSimAppCommand {
                 .setFlowEfficiencyFactor(10.0);
         vehiclesContainer.addVehicleType(vehType);
 
-        VehicleType pt = VehicleUtils.createVehicleType(Id.create("pt", VehicleType.class));
-        pt.setNetworkMode("pt");
-        vehiclesContainer.addVehicleType(pt);
-
         MatsimVehicleWriter vehicleWriter = new MatsimVehicleWriter(vehiclesContainer);
-        String output = input.toString().replace(".xml", "-including-walk-pt.xml");
+        String output = input.toString().replace(".xml", "-including-walk.xml");
         vehicleWriter.writeFile(output);
 
         return 0;

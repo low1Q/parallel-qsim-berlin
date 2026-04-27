@@ -26,7 +26,7 @@ import org.matsim.core.router.DefaultRoutingModules;
 import org.matsim.core.router.MultimodalLinkChooser;
 import org.matsim.core.router.RoutingModule;
 import org.matsim.core.router.RoutingRequest;
-import org.matsim.core.router.speedy.SpeedyALTDataBridge;
+import org.matsim.core.router.speedy.SpeedyALTFactory;
 import org.matsim.core.router.util.LeastCostPathCalculator;
 import org.matsim.core.router.util.TravelDisutility;
 import org.matsim.core.utils.timing.TimeInterpretation;
@@ -59,7 +59,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final Runnable shutdown;
     private final Config config;
     private final TravelDisutility travelDisutility;
-    private final Object landmarks;
     private final ExecutorService routingExecutor;
     private final Set<Long> loggedHours = ConcurrentHashMap.newKeySet();
     private final int preplanningHorizon;
@@ -72,14 +71,13 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private volatile boolean routingTimeLoggingIsRunning = true;
     private final String runContext;
 
-    public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, Config config, TravelTimeSnapshot sharedTravelTime, Object sharedLandmarks,
+    public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, Config config, TravelTimeSnapshot sharedTravelTime, SpeedyALTFactory speedyALTFactory,
                           TravelDisutility staticDisutility, ExecutorService routingExecutor, String runContext, int preplanningHorizon) {
         this.scenario = sharedScenario;
         this.shutdown = shutdown;
         this.config = config;
         this.travelTime = sharedTravelTime;
         this.travelDisutility = staticDisutility;
-        this.landmarks = sharedLandmarks;
         this.routingExecutor = routingExecutor;
         this.runContext = runContext;
         this.preplanningHorizon = preplanningHorizon;
@@ -87,7 +85,12 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.carRouter = ThreadLocal.withInitial(() -> {
             // Create the FAST Router using shared memory landmarks
             // This is the core 'car' logic we pre-calculated
-            LeastCostPathCalculator speedyALTCarRouter = SpeedyALTDataBridge.createRouter(landmarks, travelTime, travelDisutility);
+            LeastCostPathCalculator speedyALTCarRouter =
+                    speedyALTFactory.createPathCalculator(
+                            scenario.getNetwork(),
+                            travelDisutility,
+                            travelTime
+                    );
 
             // Resolve lightweight helpers from the adhocInjector
             // Since 'walk' is teleported in our config, this is safe and fast
@@ -102,8 +105,8 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
 
 
-
         //this.carRouterModule = ThreadLocal.withInitial(() -> ControllerUtils.createAdhocInjector(scenario).getInstance(Key.get(RoutingModule.class, Names.named("car"))));
+
 
 
 
@@ -127,18 +130,15 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     @Override
     public void shutdown(Empty request, StreamObserver<Empty> responseObserver) {
         log.info("Received shutdown request");
-
         // Signal an den Writer-Thread
         routingTimeLoggingIsRunning = false;
-
         try {
             // Dem Writer kurz Zeit geben, die Queue zu leeren
-            routingLogWriterThread.join(2000);
+            routingLogWriterThread.join(5_000);
         } catch (InterruptedException e) {
             log.warn("Shutdown interrupted while waiting for routing profiling writer");
             Thread.currentThread().interrupt();
         }
-
         log.info("Shutting down routing service");
         responseObserver.onNext(Empty.getDefaultInstance());
         responseObserver.onCompleted();
@@ -232,14 +232,11 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private Routing.Response convertToProtoResponse(List<? extends PlanElement> planElements, long responseSentForRust, ByteString requestId) {
         Routing.Response.Builder responseBuilder = Routing.Response.newBuilder();
 
-        boolean firstLeg = true;
-
         for (PlanElement element : planElements) {
             if (element instanceof Activity activity) {
                 responseBuilder.addActivities(convertToProtoActivity(activity));
             } else if (element instanceof Leg leg) {
-                responseBuilder.addLegs(convertToProtoLeg(leg, firstLeg));
-                firstLeg = false;
+                responseBuilder.addLegs(convertToProtoLeg(leg));
             } else {
                 throw new IllegalArgumentException("Unsupported PlanElement type: " + element.getClass().getName());
             }
@@ -250,7 +247,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         return responseBuilder.build();
     }
 
-    private Routing.Leg convertToProtoLeg(Leg leg, boolean attachPreplanningHorizon) {
+    private Routing.Leg convertToProtoLeg(Leg leg) {
         Routing.Leg.Builder legBuilder = Routing.Leg.newBuilder().setMode(leg.getMode()).setTravTime((int) leg.getTravelTime().orElseThrow(() -> new IllegalArgumentException("Leg must have travel time")));
         leg.getDepartureTime().ifDefined(d -> legBuilder.setDepTime((int) d));
         Optional.ofNullable(leg.getRoutingMode()).ifPresent(legBuilder::setRoutingMode);

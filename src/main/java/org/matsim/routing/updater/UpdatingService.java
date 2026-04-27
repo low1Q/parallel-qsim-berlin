@@ -1,5 +1,6 @@
 package org.matsim.routing.updater;
 
+import antlr.debug.Event;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.name.Names;
@@ -16,8 +17,6 @@ import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.events.LinkEnterEvent;
 import org.matsim.api.core.v01.events.LinkLeaveEvent;
-import org.matsim.api.core.v01.events.VehicleEntersTrafficEvent;
-import org.matsim.api.core.v01.events.VehicleLeavesTrafficEvent;
 import org.matsim.api.core.v01.network.Link;
 import org.matsim.core.api.experimental.events.EventsManager;
 import org.matsim.core.events.EventsUtils;
@@ -47,8 +46,6 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
     private final Map<String, Integer> fastLinkToIndex; // String -> Array-Index
     private final double[] internalTravelTimes;         // Das Arbeits-Array
     private final Set<String> pendingAffectedLinkIds = new HashSet<>();
-    private int processedLinkEnterEvents = 0;
-    private int processedLinkLeavesEvents = 0;
 
     //Profiling
     private final ConcurrentLinkedQueue<UpdatingProfilingEntry> updatingProfilingQueue = new ConcurrentLinkedQueue<>();
@@ -93,14 +90,12 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
         log.info("Received shutdown request");
         log.info("EventCount: {}" ,eventCount);
         updatingLoggingIsRunning = false;
-
         try {
-            updatingLogWriterThread.join(2000);
+            updatingLogWriterThread.join(5_000);
         } catch (InterruptedException e) {
             log.warn("Shutdown interrupted while waiting for updating profiling writer");
             Thread.currentThread().interrupt();
         }
-
         log.info("Shutting down updating service");
         responseObserver.onNext(Empty.getDefaultInstance());
         responseObserver.onCompleted();
@@ -127,8 +122,6 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
             updaterExecutor.execute(() -> {
                 long batchReceivedNs = unixNanosNow();
                 long totalStartNs = System.nanoTime();
-                //int index = 0;
-                //String[] test = new String[batchRequest.getRequestsCount()];
 
                 try {
                     long batchSentAtNs = batchRequest.getGrpcBatchSentAtRealtime();
@@ -150,13 +143,10 @@ public class UpdatingService extends EventSharingServiceGrpc.EventSharingService
                             pendingAffectedLinkIds.add(request.getLinkId());
                         }
                         processEvent(request);
-//                        test[index] = request.getEventType();
-//                        index++;
                         long eventDetectedAtRust = request.getEventDetectedAtRealtime();
                         long eventFromDetectedToProcessed = unixNanosNow() - eventDetectedAtRust;
                         eventsLifespanSum += eventFromDetectedToProcessed;
                     }
-                    //log.info(Arrays.toString(test));
                     eventCount = eventCount + batchRequest.getRequestsCount();
                     float avgEventLifespan = requestsCount > 0 ? eventsLifespanSum / (float) requestsCount : 0f;
 

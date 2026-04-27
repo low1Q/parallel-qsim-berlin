@@ -17,15 +17,10 @@ import org.matsim.api.core.v01.population.Person;
 import org.matsim.application.MATSimAppCommand;
 import org.matsim.core.config.Config;
 import org.matsim.core.config.ConfigUtils;
-import org.matsim.core.config.groups.RoutingConfigGroup;
 import org.matsim.core.controler.ControllerUtils;
 import org.matsim.core.controler.OutputDirectoryHierarchy;
-import org.matsim.core.router.costcalculators.OnlyTimeDependentTravelDisutilityFactory;
-import org.matsim.core.router.speedy.SpeedyALTDataBridge;
-import org.matsim.core.router.speedy.SpeedyGraph;
-import org.matsim.core.router.speedy.SpeedyGraphBuilder;
+import org.matsim.core.router.speedy.SpeedyALTFactory;
 import org.matsim.core.router.util.TravelDisutility;
-import org.matsim.core.router.util.TravelTime;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.routing.updater.UpdatingService;
 import org.matsim.vehicles.Vehicle;
@@ -99,16 +94,10 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.controller().setOutputDirectory(output);
         config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
         config.global().setNumberOfThreads(1);
-        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_600.xml.gz");
+        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
-        config.counts().setInputFile(null);
-        config.qsim().setUsePersonIdForMissingVehicleId(true);
-        config.qsim().setEndTime(86400);
-        // RoutingService ThreadLocal Warmup beschleunigen
-        config.routing().setNetworkRouteConsistencyCheck(RoutingConfigGroup.NetworkRouteConsistencyCheck.disable);
         config.travelTimeCalculator().setTraveltimeBinSize(binSize);
-
-        config.global().setInsistingOnDeprecatedConfigVersion(false);
+        config.qsim().setEndTime(43200);
 
         if (localFiles) {
             adaptToLocalFileNames(config);
@@ -121,7 +110,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Gemeinsame TravelTime-Snapshot-Instanz für Routing und Updates
         TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork(), binSize);
         // TravelDisutility, die den Snapshot nutzt
-        TravelDisutility dynamicDisutility = new org.matsim.core.router.util.TravelDisutility() {
+        TravelDisutility sharedDisutility = new org.matsim.core.router.util.TravelDisutility() {
             @Override
             public double getLinkTravelDisutility(Link link, double time, Person person, Vehicle vehicle) {
                 // Hier rufen wir direkt den Snapshot auf
@@ -136,15 +125,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         };
 
         // Initialisierung des SpeedyALTRouters beim Server-Start
-        log.info("Pre-calculating SpeedyALT landmarks...");
-        SpeedyGraph graph = SpeedyGraphBuilder.build(sharedScenario.getNetwork(), null);
-        // Statische Free-Speed TravelTime und TravelDisutility als unterste Schranke für Landmark-Berechnung
-        TravelTime staticFreeSpeed = sharedTravelTime.getStaticFreeSpeedView();
-        TravelDisutility staticDisutility = new OnlyTimeDependentTravelDisutilityFactory()
-                .createTravelDisutility(staticFreeSpeed);
-        // Wir speichern es als Object, da wir den Typ SpeedyALTData hier nicht schreiben dürfen
-        Object sharedLandmarks = SpeedyALTDataBridge.createSharedData(graph, 16, staticDisutility);
-        log.info("Preprocessing finished. Starting gRPC server...");
+        log.info("Creating sharedSpeedyALTFactory...");
+        SpeedyALTFactory sharedSpeedyALTFactory = new SpeedyALTFactory();
 
         // Fahrzeuge für alle Personen vorbereiten
         prepareVehicles(sharedScenario);
@@ -156,11 +138,11 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
         // Definiere die spezialisierten Worker-Pools
         // Routing-Threads (Lese-Zugriffe)
-        int numThreads = (numRoutingThreads > 0) ? numRoutingThreads : Runtime.getRuntime().availableProcessors() - 1;
+        int numThreads = (numRoutingThreads > 0) ? numRoutingThreads : Runtime.getRuntime().availableProcessors() - 4;
         ExecutorService routingExecutor = new ThreadPoolExecutor(
                 numThreads, numThreads, // Fixe Anzahl Threads passend zur CPU, wenn numRoutingThreads ≤ 0
                 0L, TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(1000), // Begrenzte Queue gegen Memory-Overflow
+                new ArrayBlockingQueue<>(500), // Begrenzte Queue gegen Memory-Overflow
                 new ThreadFactoryBuilder().setNameFormat("router-thread-%d").build(),
                 loggingHandler // Backpressure-Mechanismus
         );
@@ -213,7 +195,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         UpdatingService updatingService = new UpdatingService(sharedScenario, sharedAdhocInjector,
                 serverShutdown, updaterExecutor, sharedTravelTime, runContext);
         RoutingService routingService = new RoutingService(sharedScenario, sharedAdhocInjector,
-                serverShutdown, config, sharedTravelTime, sharedLandmarks, dynamicDisutility, routingExecutor, runContext, preplanningHorizon);
+                serverShutdown, config, sharedTravelTime, sharedSpeedyALTFactory, sharedDisutility, routingExecutor, runContext, preplanningHorizon);
 
         // Eager Warmup (Direkt auf dem rpcExecutor)
         log.info("Starting Eager Warmup on {} threads...", numThreads);
@@ -234,10 +216,10 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
             log.error("Warmup timed out! Some threads might not be ready.");
         }
 
-
         log.info("Warmup complete. Starting gRPC Server.");
 
-        // Start server mit rpcExecutor
+        log.info("Preprocessing finished. Starting gRPC server...");
+        // Start server mit beiden Services und Reflection
         Server server = ServerBuilder.forPort(PORT)
                 .addService(routingService)
                 .addService(updatingService)

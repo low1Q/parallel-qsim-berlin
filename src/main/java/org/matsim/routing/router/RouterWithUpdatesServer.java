@@ -97,7 +97,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         config.travelTimeCalculator().setTraveltimeBinSize(binSize);
-        config.qsim().setEndTime(43200);
+        config.qsim().setEndTime(86400);
 
         if (localFiles) {
             adaptToLocalFileNames(config);

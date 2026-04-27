@@ -61,7 +61,8 @@ public class PopulationMinActivityTime implements MATSimAppCommand {
             for (int i = 1; i < activities.size()-1; i++) {
                 double referenceStart = referenceActivities.get(i).getStartTime().orElseThrow(RuntimeException::new);
                 double referenceEnd = referenceActivities.get(i).getEndTime().orElseThrow(RuntimeException::new);
-                activities.get(i).setMaximumDuration(referenceEnd - referenceStart);
+                double newDuration = referenceEnd - referenceStart;
+                activities.get(i).setMaximumDuration(Math.max(newDuration, minDuration));
                 activities.get(i).setStartTimeUndefined();
                 activities.get(i).setEndTimeUndefined();
             }

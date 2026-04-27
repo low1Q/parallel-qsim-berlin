@@ -140,17 +140,22 @@ run-routing: prepare
 		--event-sharing-closed-bin-batch-size 10000 \
 		--num-routing-threads 4 \
 		--enable-performance-logging \
-		--set protofiles.network=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
-		--set protofiles.ids=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
-		--set protofiles.vehicles=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
-		--set protofiles.population=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+		--set protofiles.population=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+#				--set protofiles.network=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+#        		--set protofiles.ids=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+#        		--set protofiles.vehicles=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+#        		--set protofiles.population=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
 
 
 
-#		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
-#		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
-#		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
-#		--set protofiles.population=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+
+#		--set protofiles.network=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+#		--set protofiles.ids=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+#		--set protofiles.vehicles=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+#		--set protofiles.population=/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/binpb-minact-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
 
 # ===== POST_PROCESSING =====		--set computational_setup.global_sync=true \		--disable-all-measurements \				--only-route-blocking-wait \		--enable-performance-logging \		--set computational_setup.adapter_worker_threads=4 \
 

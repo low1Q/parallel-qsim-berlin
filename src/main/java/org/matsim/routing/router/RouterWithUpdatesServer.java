@@ -223,7 +223,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Start server mit beiden Services und Reflection
         Server server = ServerBuilder.forPort(PORT)
                 .addService(routingService)
-                //.addService(updatingService)
+                .addService(updatingService)
                 .addService(ProtoReflectionService.newInstance())
                 .build()
                 .start();

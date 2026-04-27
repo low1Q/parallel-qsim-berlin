@@ -229,7 +229,7 @@ public class TravelTimeSnapshot implements TravelTime {
     public boolean bindToTime(double timeSeconds) {
         long currentBin = binStart(timeSeconds);
         // Immer zwei Bins davor routen.
-        long targetBin = currentBin - BIN_LAG * windowSizeSeconds;
+        long targetBin = 0;
         if (targetBin < 0) {
             targetBin = 0;
         }

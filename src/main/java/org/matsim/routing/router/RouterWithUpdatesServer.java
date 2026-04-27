@@ -94,8 +94,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.controller().setOutputDirectory(output);
         config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
         config.global().setNumberOfThreads(1);
-        config.plans().setInputFile("/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_" + preplanningHorizon + ".xml.gz");
-        //config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
+        //config.plans().setInputFile("/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_" + preplanningHorizon + ".xml.gz");
+        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         config.travelTimeCalculator().setTraveltimeBinSize(binSize);
         config.qsim().setEndTime(86400);
@@ -111,7 +111,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Gemeinsame TravelTime-Snapshot-Instanz für Routing und Updates
         TravelTimeSnapshot sharedTravelTime = new TravelTimeSnapshot(sharedScenario.getNetwork(), binSize);
         // TravelDisutility, die den Snapshot nutzt
-        TravelDisutility sharedDisutility = new org.matsim.core.router.util.TravelDisutility() {
+        TravelDisutility sharedDisutility = new TravelDisutility() {
             @Override
             public double getLinkTravelDisutility(Link link, double time, Person person, Vehicle vehicle) {
                 // Hier rufen wir direkt den Snapshot auf
@@ -223,7 +223,7 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         // Start server mit beiden Services und Reflection
         Server server = ServerBuilder.forPort(PORT)
                 .addService(routingService)
-                .addService(updatingService)
+                //.addService(updatingService)
                 .addService(ProtoReflectionService.newInstance())
                 .build()
                 .start();

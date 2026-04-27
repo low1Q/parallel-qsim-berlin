@@ -29,12 +29,14 @@ import org.matsim.core.router.RoutingRequest;
 import org.matsim.core.router.speedy.SpeedyALTFactory;
 import org.matsim.core.router.util.LeastCostPathCalculator;
 import org.matsim.core.router.util.TravelDisutility;
+import org.matsim.core.router.util.TravelTime;
 import org.matsim.core.utils.timing.TimeInterpretation;
 import org.matsim.facilities.ActivityFacilitiesFactoryImpl;
 import org.matsim.facilities.ActivityFacility;
 import org.matsim.facilities.Facility;
 import org.matsim.utils.objectattributes.attributable.Attributes;
 import org.matsim.utils.objectattributes.attributable.AttributesImpl;
+import org.matsim.vehicles.Vehicle;
 import routing.Routing;
 import routing.RoutingServiceGrpc;
 
@@ -62,6 +64,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final ExecutorService routingExecutor;
     private final Set<Long> loggedHours = ConcurrentHashMap.newKeySet();
     private final int preplanningHorizon;
+    private final TravelDisutility freespeedTravelDisutility;
 
     //private final ThreadLocal<RoutingModule> carRouterModule;
 
@@ -70,6 +73,7 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
     private final Thread routingLogWriterThread;
     private volatile boolean routingTimeLoggingIsRunning = true;
     private final String runContext;
+    private final TravelTime freespeedTravelTime;
 
     public RoutingService(Scenario sharedScenario, Injector sharedAdhocInjector, Runnable shutdown, Config config, TravelTimeSnapshot sharedTravelTime, SpeedyALTFactory speedyALTFactory,
                           TravelDisutility staticDisutility, ExecutorService routingExecutor, String runContext, int preplanningHorizon) {
@@ -82,14 +86,28 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.runContext = runContext;
         this.preplanningHorizon = preplanningHorizon;
 
+        this.freespeedTravelTime = (link, time, person, vehicle) ->
+                link.getLength() / link.getFreespeed();
+        this.freespeedTravelDisutility = new TravelDisutility() {
+            @Override
+            public double getLinkTravelDisutility(Link link, double time, Person person, Vehicle vehicle) {
+                return link.getLength() / link.getFreespeed();
+            }
+
+            @Override
+            public double getLinkMinimumTravelDisutility(Link link) {
+                return link.getLength() / link.getFreespeed();
+            }
+        };
+
         this.carRouter = ThreadLocal.withInitial(() -> {
             // Create the FAST Router using shared memory landmarks
             // This is the core 'car' logic we pre-calculated
             LeastCostPathCalculator speedyALTCarRouter =
                     speedyALTFactory.createPathCalculator(
                             scenario.getNetwork(),
-                            travelDisutility,
-                            travelTime
+                            freespeedTravelDisutility,
+                            freespeedTravelTime
                     );
 
             // Resolve lightweight helpers from the adhocInjector
@@ -182,11 +200,11 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             }
 
             long bindStart = System.nanoTime();
-            boolean hadToWait = travelTime.bindToTime(requestNow);
+            boolean hadToWait = false;
             long bindEnd = System.nanoTime();
             long bindWaitNs = bindEnd - bindStart;
 
-            assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
+            //assert travelTime.isBound() : "TravelTimeSnapshot must be bound before routing";
 
             long createCarRouteRequestStart = System.nanoTime();
             RoutingRequest carRouteRequest = createCarRouteRequest(request);
@@ -224,8 +242,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
             log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage(), e);
             // This is vital: Rust is waiting for this message!
             responseObserver.onError(Status.INTERNAL.withDescription("Routing failed in Java: " + e.getMessage()).asException());
-        } finally {
-            travelTime.unbind();
         }
     }
 

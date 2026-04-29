@@ -9,21 +9,33 @@ PCT := 1
 
 MODE ?= cargo
 
-HORIZON := 600
+HORIZON ?= 600
+# Population selector for run-routing/router:
+#   POPULATION=normal      -> berlin-v6.4-1pct.plans-filtered_<HORIZON> + binpb-hor<HORIZON>
+#   POPULATION=min_act_pop -> min-act-pop-filtered_<HORIZON> + binpb-minact-hor<HORIZON>
+# Alias POPULATION=minact is accepted.
+POPULATION ?= normal
+MINACT_INPUT_DIR ?= /home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test
 
 java_prepare := java -Xmx$(MEMORY) \
     --add-opens java.base/java.lang=ALL-UNNAMED \
     --add-opens java.base/java.util=ALL-UNNAMED \
     -Dguice.disable.misplaced.annotation.check=true \
-    -XX:+UseZGC -cp $(JAR) org.matsim.prepare.RunParallelQSimBerlinPreparation
+    -XX:+UseG1GC -cp $(JAR) org.matsim.prepare.RunParallelQSimBerlinPreparation
 
 # prefer local DTDs to avoid network access (i.e. on hpc clusters)
-java_router := java -Xmx$(MEMORY) -XX:+UseZGC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.routing.router.RouterWithUpdatesServer
+java_router := java -Xmx$(MEMORY) -XX:+UseG1GC -Dmatsim.preferLocalDtds=true -cp $(JAR) org.matsim.routing.router.RouterWithUpdatesServer
 
 p := ./input/$(BV)
 op := ./output/$(BV)/$(PCT)pct
 
-.PHONY: prepare
+POPULATION_NORMALIZED = $(if $(filter minact min_act_pop,$(POPULATION)),min_act_pop,normal)
+ROUTING_RUN_ID = berlin-$(BV)-$(PCT)pct
+ROUTING_BINPB_DIR = $(if $(filter min_act_pop,$(POPULATION_NORMALIZED)),$(MINACT_INPUT_DIR)/binpb-minact-hor$(HORIZON),$(op)/binpb-hor$(HORIZON))
+ROUTING_POPULATION_XML = $(if $(filter min_act_pop,$(POPULATION_NORMALIZED)),$(MINACT_INPUT_DIR)/min-act-pop-filtered_$(HORIZON).xml.gz,$(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz)
+ROUTING_IDS_BINPB = $(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).ids.binpb
+
+.PHONY: prepare routing-inputs
 
 # ===== JAVA =====
 $(JAR):
@@ -61,7 +73,7 @@ $(op)/berlin-$(BV)-$(PCT)pct.plans.xml.gz:
 $(op)/berlin-$(BV)-vehicleTypes.xml:
 	curl https://raw.githubusercontent.com/matsim-scenarios/matsim-berlin/refs/heads/main/input/$(BV)/$(notdir $@) -o $@
 
-$(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml: $(op)/berlin-$(BV)-vehicleTypes.xml $(JAR)
+$(op)/berlin-$(BV)-vehicleTypes-including-walk.xml: $(op)/berlin-$(BV)-vehicleTypes.xml $(JAR)
 	$(java_prepare) prepare adapt-vehicle-types\
 		--input $<
 
@@ -86,7 +98,7 @@ $(op)/berlin-$(BV).counts-vmz.xml.gz:
 
 # ===== CONVERT TO BINARY PROTOBUF =====
 
-$(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml $(op)/berlin-$(BV)-network.xml.gz
+$(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz $(op)/berlin-$(BV)-vehicleTypes-including-walk.xml $(op)/berlin-$(BV)-network.xml.gz
 	if [ "$(MODE)" = "bin" ]; then \
 		RUNNER="$(RUST_BASE)/target/release/convert_to_binary"; \
 	else \
@@ -95,11 +107,19 @@ $(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb: $(op)/berlin-$(BV)-$
 	eval "$$RUNNER \
 		--network $(op)/berlin-$(BV)-network.xml.gz\
 		--population $(op)/berlin-$(BV)-$(PCT)pct.plans-filtered_$(HORIZON).xml.gz\
-		--vehicles $(op)/berlin-$(BV)-vehicleTypes-including-walk-pt.xml\
+		--vehicles $(op)/berlin-$(BV)-vehicleTypes-including-walk.xml\
 		--output-dir $(op)\
 		--run-id binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct"
 
 prepare: mk-output-folders $(op)/binpb-hor$(HORIZON)/berlin-$(BV)-$(PCT)pct.ids.binpb
+
+routing-inputs:
+	@if [ "$(POPULATION_NORMALIZED)" = "normal" ]; then \
+		$(MAKE) prepare HORIZON=$(HORIZON) PCT=$(PCT) MODE=$(MODE); \
+	else \
+		test -f "$(ROUTING_POPULATION_XML)" || { echo "Missing population XML: $(ROUTING_POPULATION_XML)"; exit 1; }; \
+		test -f "$(ROUTING_IDS_BINPB)" || { echo "Missing binpb ids file: $(ROUTING_IDS_BINPB)"; exit 1; }; \
+	fi
 
 # ===== RUN SIMULATION =====
 # Used variables:
@@ -124,7 +144,7 @@ run: prepare
 	eval "$$CMD"
 
 # Setting the input files manually in order to reflect the horizon properly
-run-routing: prepare
+run-routing: routing-inputs
 	@if [ -n "$(URL)" ]; then \
 		ROUTER_URL="$(URL)"; \
 	else \
@@ -138,13 +158,21 @@ run-routing: prepare
 		--preplanning-horizon $(HORIZON) \
 		--event-sharing-bin-size-secs 900 \
 		--event-sharing-closed-bin-batch-size 10000 \
+		--num-routing-threads 4 \
 		--enable-performance-logging \
-		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
-		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
-		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
-		--set protofiles.population=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+		--set protofiles.network=$(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).network.binpb \
+		--set protofiles.ids=$(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).ids.binpb \
+		--set protofiles.vehicles=$(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).vehicles.binpb \
+		--set protofiles.population=$(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).plans.binpb"
 
-# ===== POST_PROCESSING =====		--disable-all-measurements \				--only-route-blocking-wait \		--enable-performance-logging \
+
+
+#		--set protofiles.network=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.network.binpb \
+#		--set protofiles.ids=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.ids.binpb \
+#		--set protofiles.vehicles=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.vehicles.binpb \
+#		--set protofiles.population=../../output/v6.4/$(PCT)pct/binpb-hor$(HORIZON)/berlin-v6.4-$(PCT)pct.plans.binpb"
+
+# ===== POST_PROCESSING =====		--set computational_setup.global_sync=true \		--disable-all-measurements \				--only-route-blocking-wait \		--enable-performance-logging \		--set computational_setup.adapter_worker_threads=4 \
 
 convert-events:
 	if [ "$(MODE)" = "bin" ]; then \
@@ -177,12 +205,12 @@ router-deps: $(JAR) \
              $(op)/berlin-$(BV)-vehicleTypes.xml
 	@echo "Dependencies for router are up to date."
 
-router: router-deps
+router: router-deps routing-inputs
 	@if [ -n "$(THREADS)" ]; then \
 		EXTRA="--threads $(THREADS)"; \
 	else \
 		EXTRA=""; \
 	fi; \
-	CMD="$(java_router) --config $(op)/berlin-$(BV)-$(PCT)pct.config.xml --sample $(PCT) --output $(op)/routing-$(RUN_ID) $$EXTRA --localFiles"; \
+	CMD="$(java_router) --config $(op)/berlin-$(BV)-$(PCT)pct.config.xml --sample $(PCT) --output $(op)/routing-$(RUN_ID) $$EXTRA --localFiles --pH $(HORIZON) --populationVariant $(POPULATION_NORMALIZED) --populationFile $(ROUTING_POPULATION_XML)"; \
 	echo "$$CMD"; \
 	eval "$$CMD"

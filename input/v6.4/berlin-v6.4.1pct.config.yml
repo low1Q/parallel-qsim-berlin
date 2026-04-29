@@ -7,7 +7,7 @@ modules:
     ids: ../../output/v6.4/1pct/binpb-hor600/berlin-v6.4-1pct.ids.binpb
   partitioning:
     type: Partitioning
-    num_parts: 8
+    num_parts: 4
 
     method: !Metis
       vertex_weight:

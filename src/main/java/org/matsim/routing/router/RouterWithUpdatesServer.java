@@ -71,6 +71,12 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
     @CommandLine.Option(names = "--addString", description = "Additional string to manuell add to the output directory name")
     private String addContextAsString = "";
 
+    @CommandLine.Option(names = "--populationVariant", description = "Population variant: normal or min_act_pop/minact")
+    private String populationVariant = "normal";
+
+    @CommandLine.Option(names = "--populationFile", description = "Explicit path to the selected population XML. If set, this overrides populationVariant-based defaults.")
+    private String populationFile = "";
+
     static void main(String[] args) throws IOException, InterruptedException {
         new RouterWithUpdatesServer().execute(args);
     }
@@ -94,8 +100,10 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.controller().setOutputDirectory(output);
         config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
         config.global().setNumberOfThreads(1);
-        config.plans().setInputFile("/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_" + preplanningHorizon + ".xml.gz");
-        //config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
+        String selectedPopulationFile = resolvePopulationFile();
+        log.info("Using populationVariant={}, preplanningHorizon={}, populationFile={}",
+                populationVariant, preplanningHorizon, selectedPopulationFile);
+        config.plans().setInputFile(selectedPopulationFile);
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         config.travelTimeCalculator().setTraveltimeBinSize(binSize);
         config.qsim().setEndTime(86400);
@@ -245,6 +253,34 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         return adjusted;
     }
 
+    private String normalizePopulationVariant() {
+        if (populationVariant == null || populationVariant.isBlank()) {
+            return "normal";
+        }
+        String normalized = populationVariant.trim().toLowerCase().replace('-', '_');
+        return switch (normalized) {
+            case "normal", "base", "standard" -> "normal";
+            case "minact", "min_act", "min_act_pop", "min_activity", "min_activity_pop" -> "min_act_pop";
+            default -> throw new IllegalArgumentException(
+                    "Unsupported --populationVariant='" + populationVariant + "'. Use normal or min_act_pop.");
+        };
+    }
+
+    private String resolvePopulationFile() {
+        if (populationFile != null && !populationFile.isBlank()) {
+            return populationFile.trim();
+        }
+
+        String normalizedVariant = normalizePopulationVariant();
+        if ("min_act_pop".equals(normalizedVariant)) {
+            return "/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_"
+                    + preplanningHorizon + ".xml.gz";
+        }
+
+        String samplePrefix = (sample == null || sample.isBlank()) ? "1" : sample.trim();
+        return "berlin-v6.4-" + samplePrefix + "pct.plans-filtered_" + preplanningHorizon + ".xml.gz";
+    }
+
     private void adaptToLocalFileNames(Config config) {
         config.network().setInputFile(fileNameFromUrl(config.network().getInputFile()));
         config.vehicles().setVehiclesFile(fileNameFromUrl(config.vehicles().getVehiclesFile()));
@@ -273,9 +309,11 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
 
     private String buildRunContextString() {
         String custom = sanitizeForFilename(addContextAsString);
+        String population = sanitizeForFilename(normalizePopulationVariant());
 
         String base = String.format(
-                "bin%d-threads%d-PH%d-batch%d-parts%d",
+                "pop%s-bin%d-threads%d-PH%d-batch%d-parts%d",
+                population,
                 binSize,
                 numRoutingThreads,
                 preplanningHorizon,

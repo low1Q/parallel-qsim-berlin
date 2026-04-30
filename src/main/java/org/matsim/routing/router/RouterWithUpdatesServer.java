@@ -87,8 +87,8 @@ public class RouterWithUpdatesServer implements MATSimAppCommand {
         config.controller().setOutputDirectory(output);
         config.controller().setOverwriteFileSetting(OutputDirectoryHierarchy.OverwriteFileSetting.overwriteExistingFiles);
         config.global().setNumberOfThreads(1);
-        config.plans().setInputFile("/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_" + preplanningHorizon + ".xml.gz");
-        //config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
+        //config.plans().setInputFile("/home/lowiq/MATSimBA/parallel-qsim-berlin/input/Test/min-act-pop-filtered_" + preplanningHorizon + ".xml.gz");
+        config.plans().setInputFile("berlin-v6.4-1pct.plans-filtered_" + preplanningHorizon + ".xml.gz");
         config.network().setInputFile("berlin-v6.4-network.xml.gz");
         config.travelTimeCalculator().setTraveltimeBinSize(binSize);
         config.qsim().setEndTime(86400);

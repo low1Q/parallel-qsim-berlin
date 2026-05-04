@@ -83,8 +83,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
         this.preplanningHorizon = preplanningHorizon;
 
         this.carRouter = ThreadLocal.withInitial(() -> {
-            // Create the FAST Router using shared memory landmarks
-            // This is the core 'car' logic we pre-calculated
             LeastCostPathCalculator speedyALTCarRouter =
                     speedyALTFactory.createPathCalculator(
                             scenario.getNetwork(),
@@ -92,14 +90,11 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                             travelTime
                     );
 
-            // Resolve lightweight helpers from the adhocInjector
-            // Since 'walk' is teleported in our config, this is safe and fast
             RoutingModule walkRouter = sharedAdhocInjector.getInstance(Key.get(RoutingModule.class, named(TransportMode.walk)));
 
             TimeInterpretation timeInterpretation = sharedAdhocInjector.getInstance(TimeInterpretation.class);
             MultimodalLinkChooser linkChooser = sharedAdhocInjector.getInstance(MultimodalLinkChooser.class);
 
-            // Create the Access-Egress wrapper around the core 'car' router
             return DefaultRoutingModules.createAccessEgressNetworkRouter(TransportMode.car, speedyALTCarRouter, scenario, scenario.getNetwork(), walkRouter, timeInterpretation, linkChooser);
         });
 
@@ -171,10 +166,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
                 log.info("Received route request for simulation hour {}:00", String.format("%02d", currentHour));
             }
 
-            // Deterministische Snapshot-Bindung:
-            // blockiert, bis der für request.now benötigte one-bin-lag-Snapshot existiert
-            // Für parallel_qsim_rust: request.now = rt (RequestTime), departure_time = dt (ActivityEnd).
-
             int requestNow = request.getNow();
             if (request.getDepartureTime() - requestNow < preplanningHorizon) {
                 requestNow = request.getDepartureTime() -  preplanningHorizon;
@@ -222,7 +213,6 @@ public class RoutingService extends RoutingServiceGrpc.RoutingServiceImplBase {
 
         } catch (Exception e) {
             log.error("Critical error in routing thread {}: {}", Thread.currentThread().getName(), e.getMessage(), e);
-            // This is vital: Rust is waiting for this message!
             responseObserver.onError(Status.INTERNAL.withDescription("Routing failed in Java: " + e.getMessage()).asException());
         } finally {
             travelTime.unbind();

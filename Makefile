@@ -157,7 +157,7 @@ run-routing: routing-inputs
 		--router-ip $$ROUTER_URL \
 		--preplanning-horizon $(HORIZON) \
 		--event-sharing-bin-size-secs 900 \
-		--event-sharing-closed-bin-batch-size 10000 \
+		--event-sharing-closed-bin-batch-size 45282 \
 		--num-routing-threads 4 \
 		--enable-performance-logging \
 		--set protofiles.network=$(ROUTING_BINPB_DIR)/$(ROUTING_RUN_ID).network.binpb \

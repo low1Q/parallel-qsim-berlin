@@ -62,10 +62,10 @@
 #   plot_3_publication_latency_over_batch_time.png, falls Batch-Zeitspalten vorhanden
 #   plot_4_component_share_delivery_vs_update.png
 #   plot_5_bind_snapshot_vs_publication_latency.png
-  "plot_6_publication_latency_by_batch_size_median_lines.png"
-  plot_7_p95_publication_latency_by_batch_size_bars.png
-  plot_8_publication_latency_components_by_batch_size.png
-  plot_9_publication_latency_component_share_by_batch_size.png, falls bindSnapshot-Datei übergeben
+#   "plot_6_publication_latency_by_batch_size_median_lines.png"
+#   plot_7_p95_publication_latency_by_batch_size_bars.png
+#   plot_8_publication_latency_components_by_batch_size.png
+#   plot_9_publication_latency_component_share_by_batch_size.png, falls bindSnapshot-Datei übergeben
 
 suppressPackageStartupMessages({
   library(dplyr)
